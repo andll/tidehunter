@@ -1,5 +1,4 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::large_table::Position;
 use minibytes::Bytes;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -25,8 +24,12 @@ pub struct WalIterator {
     frag_size: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct FragPosition(u32);
+
 impl Wal {
     pub fn open(p: &impl AsRef<Path>, frag_size: u64) -> io::Result<WalIterator> {
+        assert!(frag_size <= u32::MAX as u64);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -47,7 +50,7 @@ impl Wal {
         Ok(iterator)
     }
 
-    pub fn write(&self, w: &PreparedWalWrite) -> Result<Position, WalFullError> {
+    pub fn write(&self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
         let len = w.frame.len() as u64;
         let len_aligned = Self::align(len);
         let pos = self.position.fetch_add(len_aligned, Ordering::AcqRel);
@@ -63,7 +66,9 @@ impl Wal {
             mem::transmute::<&[u8], &mut [u8]>(&self.map[pos..pos + len])
         };
         buf.copy_from_slice(w.frame.as_ref());
-        Ok(Position(pos))
+        // conversion to u32 is safe - pos is less than self.frag_size,
+        // and self.frag_size is asserted less than u32::MAX
+        Ok(FragPosition(pos as u32))
     }
 
     pub fn reader(&self) -> WalReader {
@@ -81,7 +86,7 @@ impl Wal {
 pub struct WalFullError;
 
 impl WalReader {
-    pub fn read(&self, pos: Position) -> Result<Bytes, CrcReadError> {
+    pub fn read(&self, pos: FragPosition) -> Result<Bytes, CrcReadError> {
         CrcFrame::read_from_checked_with_len(&self.map, pos.0 as usize)
     }
 }
