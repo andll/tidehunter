@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
+use crate::frag_manager::FragManager;
 use crate::large_table::LargeTable;
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
@@ -9,6 +10,7 @@ use std::path::Path;
 
 pub struct Db {
     large_table: LargeTable,
+    frag_manager: FragManager,
     cr_map: MmapMut,
 }
 
@@ -29,9 +31,11 @@ impl Db {
             Self::read_control_region(&cr_map, config)?
         };
         let large_table = LargeTable::from_unloaded(control_region.snapshot());
+        let frag_manager = FragManager::from_dir(path)?;
         Ok(Self {
             cr_map,
             large_table,
+            frag_manager,
         })
     }
 

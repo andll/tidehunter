@@ -1,4 +1,5 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -115,6 +116,20 @@ impl PreparedWalWrite {
     pub fn new(t: &impl IntoBytesFixed) -> Self {
         let frame = CrcFrame::from_bytes_fixed_with_len(t);
         Self { frame }
+    }
+}
+
+impl FragPosition {
+    pub const INVALID: FragPosition = FragPosition(u32::MAX);
+    #[cfg(test)]
+    pub const TEST: FragPosition = FragPosition(3311);
+
+    pub fn write_to_buf(&self, buf: &mut impl BufMut) {
+        buf.put_u32(self.0);
+    }
+
+    pub fn read_from_buf(buf: &mut impl Buf) -> Self {
+        Self(buf.get_u32())
     }
 }
 

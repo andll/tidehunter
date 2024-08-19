@@ -15,9 +15,9 @@ impl IntoBytesFixed for ControlRegion {
 
     fn write_into_bytes(&self, buf: &mut BytesMut) {
         buf.put_u64(self.version.0);
-        buf.put_u64(self.replay_from.0);
+        self.replay_from.write_to_buf(buf);
         for i in 0..self.snapshot.len() {
-            buf.put_u64(self.snapshot[i].0);
+            self.snapshot[i].write_to_buf(buf);
         }
     }
 }
@@ -28,10 +28,10 @@ impl ControlRegion {
     const SNAPSHOT_OFFSET: usize = Self::REPLAY_FROM_OFFSET + Position::LENGTH;
 
     pub fn new(large_table_size: usize) -> Self {
-        let snapshot = vec![Position::ZERO; large_table_size].into_boxed_slice();
+        let snapshot = vec![Position::INVALID; large_table_size].into_boxed_slice();
         Self {
             version: Version::ZERO,
-            replay_from: Position::ZERO,
+            replay_from: Position::INVALID,
             snapshot,
         }
     }
@@ -46,21 +46,25 @@ impl ControlRegion {
             Self::len_from_large_table_size(large_table_size)
         );
         let version = bytes.get_u64();
-        let replay_from = bytes.get_u64();
+        let replay_from = Position::read_from_buf(&mut bytes);
         let mut snapshot = Vec::with_capacity(large_table_size);
         for _ in 0..large_table_size {
-            snapshot.push(Position(bytes.get_u64()));
+            snapshot.push(Position::read_from_buf(&mut bytes));
         }
         let snapshot = snapshot.into_boxed_slice();
         Self {
             version: Version(version),
-            replay_from: Position(replay_from),
+            replay_from,
             snapshot,
         }
     }
 
     pub fn snapshot(&self) -> &[Position] {
         &self.snapshot
+    }
+
+    pub fn replay_from(&self) -> Position {
+        self.replay_from
     }
 
     pub fn len_from_large_table_size(large_table_size: usize) -> usize {

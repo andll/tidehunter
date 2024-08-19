@@ -1,3 +1,6 @@
+use crate::frag_manager::FragId;
+use crate::wal::FragPosition;
+use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 
@@ -6,7 +9,7 @@ pub struct LargeTable {
 }
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Position(pub u64);
+pub struct Position(FragId, FragPosition);
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
 
@@ -155,6 +158,33 @@ impl Version {
 }
 
 impl Position {
-    pub const ZERO: Position = Position(0);
+    pub const INVALID: Position = Position(FragId::INVALID, FragPosition::INVALID);
+    #[cfg(test)]
+    pub const TEST: Position = Position(FragId::TEST, FragPosition::TEST);
     pub const LENGTH: usize = 8;
+
+    pub fn write_to_buf(&self, buf: &mut impl BufMut) {
+        self.0.write_to_buf(buf);
+        self.1.write_to_buf(buf);
+    }
+
+    pub fn read_from_buf(buf: &mut impl Buf) -> Self {
+        Self(FragId::read_from_buf(buf), FragPosition::read_from_buf(buf))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    #[test]
+    fn test_position() {
+        let mut buf = BytesMut::new();
+        Position::TEST.write_to_buf(&mut buf);
+        let bytes: bytes::Bytes = buf.into();
+        let mut buf = bytes.as_ref();
+        let position = Position::read_from_buf(&mut buf);
+        assert_eq!(position, Position::TEST);
+    }
 }
