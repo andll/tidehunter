@@ -1,3 +1,4 @@
+mod config;
 mod control;
 mod crc;
 mod large_table;

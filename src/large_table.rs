@@ -38,12 +38,11 @@ enum LargeTableSnapshotEntry {
 }
 
 impl LargeTable {
-    const LENGTH: usize = 0x1_00_00;
-    const PREFIX_SIZE: usize = 2;
-
-    pub fn new() -> Self {
-        let mut data = Vec::with_capacity(Self::LENGTH);
-        for _ in 0..Self::LENGTH {
+    pub fn new(size: usize) -> Self {
+        assert!(size <= u32::MAX as usize);
+        assert!(size >= 2);
+        let mut data = Vec::with_capacity(size);
+        for _ in 0..size {
             data.push(Mutex::new(LargeTableEntry::new_empty()));
         }
         let data = data.into_boxed_slice();
@@ -61,11 +60,11 @@ impl LargeTable {
     }
 
     fn entry(&self, k: &[u8]) -> &Mutex<LargeTableEntry> {
-        assert!(k.len() >= Self::PREFIX_SIZE);
-        let mut p = [0u8; Self::PREFIX_SIZE];
-        p.copy_from_slice(&k[..Self::PREFIX_SIZE]);
-        let pos = u16::from_le_bytes(p) as usize;
-        &self.data[pos]
+        assert!(k.len() >= 4);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&k[..4]);
+        let pos = u32::from_le_bytes(p) as usize;
+        &self.data[pos % self.data.len()]
     }
 
     pub fn snapshot(&self) -> LargeTableSnapshot {
