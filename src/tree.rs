@@ -1,6 +1,6 @@
-use std::{fmt, mem};
 use std::fmt::Formatter;
 use std::rc::Rc;
+use std::{fmt, mem};
 
 pub struct Tree<const K: usize, const B: usize, const L: usize> {
     root: Rc<Node<B>>,
@@ -27,7 +27,7 @@ impl<const K: usize, const B: usize, const L: usize> Tree<K, B, L> {
                 Ok(p) => {
                     nodes_to_replace.push((node, p, level_val));
                     node = node.child(p);
-                },
+                }
                 Err(p) => {
                     last = Some((p, level_num, level_val));
                     break;
@@ -55,7 +55,7 @@ impl<const K: usize, const B: usize, const L: usize> Tree<K, B, L> {
             println!("Node   {node:?}");
             println!("Level  {}", format_b(&level));
             let position = node.lookup(&level);
-            let Ok(position) = position else {return None};
+            let Ok(position) = position else { return None };
             node = node.child(position);
         }
         Some(node.value())
@@ -64,9 +64,7 @@ impl<const K: usize, const B: usize, const L: usize> Tree<K, B, L> {
     #[inline]
     fn encode_levels(k: [u8; K]) -> [[u8; B]; L] {
         assert_eq!(Self::_ASSERT, ()); // without this line compiler just throws away _ASSERT
-        unsafe {
-            *mem::transmute::<&[u8; K], &[[u8; B]; L]>(&k)
-        }
+        unsafe { *mem::transmute::<&[u8; K], &[[u8; B]; L]>(&k) }
     }
 }
 
@@ -77,22 +75,30 @@ enum Node<const B: usize> {
 
 impl<const B: usize> Node<B> {
     pub fn lookup(&self, k: &[u8; B]) -> Result<usize, usize> {
-        let Self::Directory(directory) = self else {panic!("Lookup only permitted on directories")};
-        directory.binary_search_by_key(&k, |(k, _)|k)
+        let Self::Directory(directory) = self else {
+            panic!("Lookup only permitted on directories")
+        };
+        directory.binary_search_by_key(&k, |(k, _)| k)
     }
 
     pub fn child(&self, position: usize) -> &Rc<Node<B>> {
-        let Self::Directory(directory) = self else {panic!("Child only permitted on directories")};
+        let Self::Directory(directory) = self else {
+            panic!("Child only permitted on directories")
+        };
         &directory.get(position).expect("Position out of bound").1
     }
 
     pub fn value(&self) -> &Vec<u8> {
-        let Self::Leaf(leaf) = self else {panic!("Value only permitted on leaf")};
+        let Self::Leaf(leaf) = self else {
+            panic!("Value only permitted on leaf")
+        };
         leaf
     }
 
     pub fn clone_insert(&self, position: usize, k: [u8; B], v: Rc<Node<B>>) -> Rc<Self> {
-        let Self::Directory(directory) = self else {panic!("clone_insert only permitted on directories")};
+        let Self::Directory(directory) = self else {
+            panic!("clone_insert only permitted on directories")
+        };
         let mut directory = directory.clone();
         // todo there is probably a way to combine clone and insert in a single op
         directory.insert(position, (k, v));
@@ -100,7 +106,9 @@ impl<const B: usize> Node<B> {
     }
 
     pub fn clone_replace(&self, position: usize, k: [u8; B], v: Rc<Node<B>>) -> Rc<Self> {
-        let Self::Directory(directory) = self else {panic!("clone_insert only permitted on directories")};
+        let Self::Directory(directory) = self else {
+            panic!("clone_insert only permitted on directories")
+        };
         let mut directory = directory.clone();
         debug_assert_eq!(directory.get(position).unwrap().0, k);
         directory[position] = (k, v);
@@ -126,7 +134,7 @@ impl<const B: usize> fmt::Debug for Node<B> {
                 }
                 write!(f, "]")
             }
-            Node::Leaf(_) => write!(f, "Leaf")
+            Node::Leaf(_) => write!(f, "Leaf"),
         }
     }
 }
@@ -159,12 +167,15 @@ mod test {
         k[3] = 10;
         k[9] = 15;
         let levels = Tree::<32, 8, 4>::encode_levels(k);
-        assert_eq!(levels, [
-            [1, 1, 1, 10, 1, 1, 1, 1],
-            [1, 15, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1],
-        ])
+        assert_eq!(
+            levels,
+            [
+                [1, 1, 1, 10, 1, 1, 1, 1],
+                [1, 15, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1],
+            ]
+        )
     }
 
     #[test]
@@ -194,7 +205,7 @@ mod test {
         let mut r = [0u8; 32];
         for (i, v) in v.iter().enumerate() {
             let b = v.to_le_bytes();
-            r[i * 8..(i+1)*8].copy_from_slice(&b);
+            r[i * 8..(i + 1) * 8].copy_from_slice(&b);
         }
         r
     }
