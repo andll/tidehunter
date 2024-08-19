@@ -5,9 +5,9 @@ pub struct LargeTable {
     data: Box<[Mutex<LargeTableEntry>]>,
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Position(pub u64);
-#[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
 
 pub struct LargeTableEntry {

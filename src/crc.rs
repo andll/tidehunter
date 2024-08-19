@@ -11,11 +11,13 @@ pub trait IntoBytesFixed {
 }
 
 impl CrcFrame {
+    pub const CRC_LEN_HEADER_LENGTH: usize = 8;
+
     pub fn from_bytes_fixed(t: &impl IntoBytesFixed) -> Self {
         let mut bytes = BytesMut::with_capacity(t.len() + 4);
         bytes.put_u32(0);
         t.write_into_bytes(&mut bytes);
-        let crc = crc32fast::hash(&bytes[4..]);
+        let crc = Self::crc(&bytes[4..]);
         let crc = crc.to_be_bytes();
         bytes[..4].copy_from_slice(&crc);
         let bytes: bytes::Bytes = bytes.into();
@@ -28,7 +30,7 @@ impl CrcFrame {
         t.write_into_bytes(&mut bytes);
         let len = (t.len() as u32).to_be_bytes();
         bytes[0..4].copy_from_slice(&len);
-        let crc = crc32fast::hash(&bytes[8..]);
+        let crc = Self::crc(&bytes[8..]);
         let crc = crc.to_be_bytes();
         bytes[4..8].copy_from_slice(&crc);
         let bytes: bytes::Bytes = bytes.into();
@@ -41,7 +43,7 @@ impl CrcFrame {
             return Err(CrcReadError::OutOfBounds);
         }
         let crc = b.get_u32();
-        let actual_crc = crc32fast::hash(b);
+        let actual_crc = Self::crc(b);
         if actual_crc != crc {
             return Err(CrcReadError::CrcMismatch);
         }
@@ -49,27 +51,36 @@ impl CrcFrame {
     }
 
     pub fn read_from_checked_with_len(b: &Bytes, pos: usize) -> Result<Bytes, CrcReadError> {
-        const HEADER_LEN: usize = 8;
-        if b.len() < pos + HEADER_LEN {
+        if b.len() < pos + Self::CRC_LEN_HEADER_LENGTH {
             return Err(CrcReadError::OutOfBounds);
         }
         let mut len = [0u8; 4];
         len.copy_from_slice(&b[pos..pos + 4]);
         let len = u32::from_be_bytes(len) as usize;
         // no overflow because len and pos are converted from u32
-        if b.len() < pos + HEADER_LEN + len {
+        if b.len() < pos + Self::CRC_LEN_HEADER_LENGTH + len {
+            println!("len {len}");
             return Err(CrcReadError::OutOfBounds);
         }
 
         let mut crc = [0u8; 4];
         crc.copy_from_slice(&b[pos + 4..pos + 8]);
         let crc = u32::from_be_bytes(crc);
-        let data = b.slice(pos + HEADER_LEN..pos + HEADER_LEN + len);
-        let actual_crc = crc32fast::hash(&data);
+        let data =
+            b.slice(pos + Self::CRC_LEN_HEADER_LENGTH..pos + Self::CRC_LEN_HEADER_LENGTH + len);
+        let actual_crc = Self::crc(&data);
         if actual_crc != crc {
             return Err(CrcReadError::CrcMismatch);
         }
         Ok(data)
+    }
+
+    fn crc(b: &[u8]) -> u32 {
+        if b.len() == 0 {
+            u32::MAX
+        } else {
+            crc32fast::hash(b)
+        }
     }
 }
 
@@ -77,6 +88,12 @@ impl CrcFrame {
 pub enum CrcReadError {
     OutOfBounds,
     CrcMismatch,
+}
+
+impl CrcFrame {
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 impl AsRef<[u8]> for CrcFrame {
@@ -96,7 +113,9 @@ mod test {
         let crc = CrcFrame::from_bytes_fixed_with_len(&data);
         assert_eq!(
             &[1, 2, 3],
-            &CrcFrame::read_from_checked(&crc.bytes, 0).unwrap().as_ref()
+            &CrcFrame::read_from_checked_with_len(&crc.bytes, 0)
+                .unwrap()
+                .as_ref()
         );
         let mut bm = BytesMut::with_capacity(1024);
         bm.put_u64(u64::MAX);
@@ -104,18 +123,20 @@ mod test {
         let bytes = bytes::Bytes::from(bm.clone()).into();
         assert_eq!(
             &[1, 2, 3],
-            &CrcFrame::read_from_checked(&bytes, 8).unwrap().as_ref()
+            &CrcFrame::read_from_checked_with_len(&bytes, 8)
+                .unwrap()
+                .as_ref()
         );
         let bytes = bytes.slice(..bytes.len() - 1);
         assert_eq!(
-            CrcFrame::read_from_checked(&bytes, 8),
+            CrcFrame::read_from_checked_with_len(&bytes, 8),
             Err(CrcReadError::OutOfBounds)
         );
         let pos = bm.len() - 1;
         bm[pos] = 15;
         let bytes = bytes::Bytes::from(bm).into();
         assert_eq!(
-            CrcFrame::read_from_checked(&bytes, 8),
+            CrcFrame::read_from_checked_with_len(&bytes, 8),
             Err(CrcReadError::CrcMismatch)
         );
     }
