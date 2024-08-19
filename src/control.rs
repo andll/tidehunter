@@ -1,5 +1,6 @@
 use crate::crc::IntoBytesFixed;
 use crate::large_table::{Position, Version};
+use bytes::{BufMut, BytesMut};
 
 pub struct ControlRegion {
     version: Version,
@@ -12,15 +13,11 @@ impl IntoBytesFixed for ControlRegion {
         Version::LENGTH + Position::LENGTH + self.snapshot.len() * Position::LENGTH
     }
 
-    fn write_into_bytes(&self, buf: &mut [u8]) {
-        let version = self.version.0.to_le_bytes();
-        let replay_from = self.replay_from.0.to_le_bytes();
-        buf[Self::VERSION_OFFSET..Self::REPLAY_FROM_OFFSET].copy_from_slice(&version);
-        buf[Self::REPLAY_FROM_OFFSET..Self::SNAPSHOT_OFFSET].copy_from_slice(&replay_from);
-        let snap_buf = &mut buf[Self::SNAPSHOT_OFFSET..];
+    fn write_into_bytes(&self, buf: &mut BytesMut) {
+        buf.put_u64(self.version.0);
+        buf.put_u64(self.replay_from.0);
         for i in 0..self.snapshot.len() {
-            let sp = self.snapshot[i].0.to_le_bytes();
-            snap_buf[i * Position::LENGTH..(i + 1) * Position::LENGTH].copy_from_slice(&sp);
+            buf.put_u64(self.snapshot[i].0);
         }
     }
 }
