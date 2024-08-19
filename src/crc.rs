@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
 
 pub struct CrcFrame {
@@ -36,7 +36,19 @@ impl CrcFrame {
         Self { bytes }
     }
 
-    pub fn read_from_checked(b: &Bytes, pos: usize) -> Result<Bytes, CrcReadError> {
+    pub fn read_from_checked_no_len(mut b: &[u8]) -> Result<&[u8], CrcReadError> {
+        if b.len() < 4 {
+            return Err(CrcReadError::OutOfBounds);
+        }
+        let crc = b.get_u32();
+        let actual_crc = crc32fast::hash(b);
+        if actual_crc != crc {
+            return Err(CrcReadError::CrcMismatch);
+        }
+        Ok(b)
+    }
+
+    pub fn read_from_checked_with_len(b: &Bytes, pos: usize) -> Result<Bytes, CrcReadError> {
         const HEADER_LEN: usize = 8;
         if b.len() < pos + HEADER_LEN {
             return Err(CrcReadError::OutOfBounds);

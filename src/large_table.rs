@@ -49,6 +49,14 @@ impl LargeTable {
         Self { data }
     }
 
+    pub fn from_unloaded(snapshot: &[Position]) -> Self {
+        let data = snapshot
+            .iter()
+            .map(|p| Mutex::new(LargeTableEntry::new_unloaded(*p)))
+            .collect();
+        Self { data }
+    }
+
     pub fn insert(&self, k: Bytes, v: Position) {
         let entry = self.entry(&k);
         entry.lock().insert(k, v);
@@ -79,6 +87,13 @@ impl LargeTable {
 }
 
 impl LargeTableEntry {
+    pub fn new_unloaded(position: Position) -> Self {
+        Self {
+            data: IndexTable { data: vec![] },
+            state: LargeTableEntryState::Unloaded(position),
+        }
+    }
+
     pub fn new_empty() -> Self {
         Self {
             data: IndexTable { data: vec![] },
@@ -140,5 +155,6 @@ impl Version {
 }
 
 impl Position {
+    pub const ZERO: Position = Position(0);
     pub const LENGTH: usize = 8;
 }

@@ -40,7 +40,7 @@ impl Wal {
 
 impl WalReader {
     pub fn read(&self, pos: u32) -> Result<Bytes, CrcReadError> {
-        CrcFrame::read_from_checked(&self.map, pos as usize)
+        CrcFrame::read_from_checked_with_len(&self.map, pos as usize)
     }
 }
 
