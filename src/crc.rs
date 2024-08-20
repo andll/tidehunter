@@ -40,7 +40,7 @@ impl CrcFrame {
 
     pub fn read_from_checked_no_len(mut b: &[u8]) -> Result<&[u8], CrcReadError> {
         if b.len() < 4 {
-            return Err(CrcReadError::OutOfBounds);
+            return Err(CrcReadError::OutOfBoundsHeader);
         }
         let crc = b.get_u32();
         let actual_crc = Self::crc(b);
@@ -52,15 +52,14 @@ impl CrcFrame {
 
     pub fn read_from_checked_with_len(b: &Bytes, pos: usize) -> Result<Bytes, CrcReadError> {
         if b.len() < pos + Self::CRC_LEN_HEADER_LENGTH {
-            return Err(CrcReadError::OutOfBounds);
+            return Err(CrcReadError::OutOfBoundsHeader);
         }
         let mut len = [0u8; 4];
         len.copy_from_slice(&b[pos..pos + 4]);
         let len = u32::from_be_bytes(len) as usize;
         // no overflow because len and pos are converted from u32
         if b.len() < pos + Self::CRC_LEN_HEADER_LENGTH + len {
-            println!("len {len}");
-            return Err(CrcReadError::OutOfBounds);
+            return Err(CrcReadError::OutOfBoundsBody(len));
         }
 
         let mut crc = [0u8; 4];
@@ -86,12 +85,13 @@ impl CrcFrame {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CrcReadError {
-    OutOfBounds,
+    OutOfBoundsHeader,
+    OutOfBoundsBody(usize),
     CrcMismatch,
 }
 
 impl CrcFrame {
-    pub fn len(&self) -> usize {
+    pub fn len_with_header(&self) -> usize {
         self.bytes.len()
     }
 }
@@ -130,7 +130,7 @@ mod test {
         let bytes = bytes.slice(..bytes.len() - 1);
         assert_eq!(
             CrcFrame::read_from_checked_with_len(&bytes, 8),
-            Err(CrcReadError::OutOfBounds)
+            Err(CrcReadError::OutOfBoundsBody(3))
         );
         let pos = bm.len() - 1;
         bm[pos] = 15;
