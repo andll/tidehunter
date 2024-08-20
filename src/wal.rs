@@ -28,37 +28,12 @@ pub struct WalIterator {
     wal: Arc<Wal>,
     map: Bytes,
     position: u64,
-    layout: FragLayout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FragPosition(u32);
 
 impl WalWriter {
-    pub fn open(p: &impl AsRef<Path>, layout: FragLayout) -> io::Result<WalIterator> {
-        layout.assert_layout();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(p)?;
-        file.set_len(layout.frag_size)?;
-        let map = unsafe {
-            memmap2::MmapOptions::new()
-                .len(layout.frag_size as usize)
-                .map_mut(&file)?
-        };
-        let map = map.into();
-        let reader = Wal::from_file(file, layout.clone());
-        let iterator = WalIterator {
-            wal: reader,
-            map,
-            position: 0,
-            layout,
-        };
-        Ok(iterator)
-    }
-
     pub fn write(&self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
@@ -77,10 +52,6 @@ impl WalWriter {
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
         Ok(FragPosition(pos as u32))
-    }
-
-    pub fn reader(&self) -> Arc<Wal> {
-        self.wal.clone()
     }
 }
 
@@ -190,6 +161,7 @@ impl Wal {
             .read(true)
             .write(true)
             .open(p)?;
+        file.set_len(layout.frag_size)?;
         Ok(Self::from_file(file, layout))
     }
 
@@ -204,21 +176,41 @@ impl Wal {
 
     pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
         let (map, offset) = self.layout.locate(pos.0 as u64);
+        let map = self.map(map)?;
+        // todo avoid clone, introduce Bytes::slice_in_place
+        Ok(CrcFrame::read_from_checked_with_len(&map, offset as usize)?)
+    }
+
+    fn map(&self, map: u64) -> io::Result<Bytes> {
         let mut maps = self.maps.lock();
         let b = match maps.entry(map) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(map);
                 let mmap = unsafe {
+                    // todo - some mappings can be read-only
                     memmap2::MmapOptions::new()
                         .offset(range.start)
                         .len(self.layout.map_size as usize)
-                        .map(&self.file)?
+                        .map_mut(&self.file)?
                 };
                 va.insert(mmap.into())
             }
             Entry::Occupied(oc) => oc.into_mut(),
         };
-        Ok(CrcFrame::read_from_checked_with_len(b, offset as usize)?)
+        Ok(b.clone())
+    }
+
+    pub fn wal_iterator(self: &Arc<Self>) -> WalIterator {
+        let map = self.map(0).unwrap(); // todo fix unwrap
+        WalIterator {
+            wal: self.clone(),
+            position: 0,
+            map,
+        }
+    }
+
+    pub fn writer(self: &Arc<Self>) -> WalWriter {
+        self.wal_iterator().into_writer()
     }
 }
 
@@ -233,7 +225,7 @@ impl WalIterator {
     pub fn into_writer(self) -> WalWriter {
         let position = AtomicFragPosition {
             position: Arc::new(AtomicU64::new(self.position)),
-            layout: self.layout,
+            layout: self.wal.layout.clone(),
         };
         WalWriter {
             wal: self.wal,
@@ -299,59 +291,55 @@ mod tests {
             frag_size: 1024,
             map_size: 1024,
         };
-        let wal = WalWriter::open(&file, layout).unwrap().into_writer();
-        let reader = wal.reader();
-        let pos = wal.write(&PreparedWalWrite::new(&vec![1, 2, 3])).unwrap();
-        let data = reader.read(pos).unwrap();
+        let wal = Wal::open(&file, layout).unwrap();
+        let writer = wal.writer();
+        let pos = writer
+            .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
+            .unwrap();
+        let data = wal.read(pos).unwrap();
         assert_eq!(&[1, 2, 3], data.as_ref());
-        let pos = wal.write(&PreparedWalWrite::new(&vec![])).unwrap();
-        let data = reader.read(pos).unwrap();
+        let pos = writer.write(&PreparedWalWrite::new(&vec![])).unwrap();
+        let data = wal.read(pos).unwrap();
         assert_eq!(&[] as &[u8], data.as_ref());
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_LEN_HEADER_LENGTH * 3];
-        let pos = wal.write(&PreparedWalWrite::new(&large)).unwrap();
-        let data = reader.read(pos).unwrap();
+        let pos = writer.write(&PreparedWalWrite::new(&large)).unwrap();
+        let data = wal.read(pos).unwrap();
         assert_eq!(&large, data.as_ref());
-        let err = wal.write(&PreparedWalWrite::new(&vec![]));
+        let err = writer.write(&PreparedWalWrite::new(&vec![]));
         err.expect_err("Must fail");
+        drop(writer);
         drop(wal);
-        drop(reader);
         let layout = FragLayout {
             frag_size: 2048,
-            map_size: 1024,
+            map_size: 2048,
         };
-        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
-        assert_bytes(&[1, 2, 3], wal.next());
-        assert_bytes(&[], wal.next());
-        assert_bytes(&large, wal.next());
-        wal.next().expect_err("Error expected");
-        let wal = wal.into_writer();
-        let reader = wal.reader();
-        let pos = wal
+        let wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut wal_iterator = wal.wal_iterator();
+        assert_bytes(&[1, 2, 3], wal_iterator.next());
+        assert_bytes(&[], wal_iterator.next());
+        assert_bytes(&large, wal_iterator.next());
+        wal_iterator.next().expect_err("Error expected");
+        let writer = wal_iterator.into_writer();
+        let pos = writer
             .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
             .unwrap();
-        let data = reader.read(pos).unwrap();
+        let data = wal.read(pos).unwrap();
         assert_eq!(&[91, 92, 93], data.as_ref());
+        drop(writer);
         drop(wal);
-        drop(reader);
-        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
-        assert_bytes(&[1, 2, 3], wal.next());
-        assert_bytes(&[], wal.next());
-        assert_bytes(&large, wal.next());
-        assert_bytes(&[91, 92, 93], wal.next());
-        wal.next().expect_err("Error expected");
-        drop(wal);
-        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
-        let p1 = wal.next().unwrap().0;
-        let p2 = wal.next().unwrap().0;
-        let p3 = wal.next().unwrap().0;
-        let p4 = wal.next().unwrap().0;
-        wal.next().expect_err("Error expected");
-        drop(wal);
-        let reader = Wal::open(&file, layout.clone()).unwrap();
-        assert_eq!(&[1, 2, 3], reader.read(p1).unwrap().as_ref());
-        assert_eq!(&[] as &[u8], reader.read(p2).unwrap().as_ref());
-        assert_eq!(&large, reader.read(p3).unwrap().as_ref());
-        assert_eq!(&[91, 92, 93], reader.read(p4).unwrap().as_ref());
+        let wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut wal_iterator = wal.wal_iterator();
+        let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
+        let p2 = assert_bytes(&[], wal_iterator.next());
+        let p3 = assert_bytes(&large, wal_iterator.next());
+        let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
+        wal_iterator.next().expect_err("Error expected");
+        drop(wal_iterator);
+        let wal = Wal::open(&file, layout.clone()).unwrap();
+        assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
+        assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
+        assert_eq!(&large, wal.read(p3).unwrap().as_ref());
+        assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().as_ref());
     }
 
     #[test]
@@ -385,8 +373,9 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_bytes(e: &[u8], v: Result<(FragPosition, Bytes), CrcReadError>) {
+    fn assert_bytes(e: &[u8], v: Result<(FragPosition, Bytes), CrcReadError>) -> FragPosition {
         let v = v.expect("Expected value, bot nothing");
         assert_eq!(e, v.1.as_ref());
+        v.0
     }
 }
