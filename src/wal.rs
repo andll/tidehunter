@@ -12,20 +12,20 @@ use std::sync::Arc;
 use std::{io, mem};
 
 #[derive(Clone)]
-pub struct Wal {
-    reader: Arc<WalReader>,
+pub struct WalWriter {
+    wal: Arc<Wal>,
     map: Bytes,
     position: AtomicFragPosition,
 }
 
-struct WalReader {
+struct Wal {
     file: File,
     layout: FragLayout,
     maps: Mutex<BTreeMap<u64, Bytes>>,
 }
 
 pub struct WalIterator {
-    reader: Arc<WalReader>,
+    wal: Arc<Wal>,
     map: Bytes,
     position: u64,
     layout: FragLayout,
@@ -34,7 +34,7 @@ pub struct WalIterator {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct FragPosition(u32);
 
-impl Wal {
+impl WalWriter {
     pub fn open(p: &impl AsRef<Path>, layout: FragLayout) -> io::Result<WalIterator> {
         layout.assert_layout();
         let file = OpenOptions::new()
@@ -49,9 +49,9 @@ impl Wal {
                 .map_mut(&file)?
         };
         let map = map.into();
-        let reader = WalReader::from_file(file, layout.clone());
+        let reader = Wal::from_file(file, layout.clone());
         let iterator = WalIterator {
-            reader,
+            wal: reader,
             map,
             position: 0,
             layout,
@@ -79,8 +79,8 @@ impl Wal {
         Ok(FragPosition(pos as u32))
     }
 
-    pub fn reader(&self) -> Arc<WalReader> {
-        self.reader.clone()
+    pub fn reader(&self) -> Arc<Wal> {
+        self.wal.clone()
     }
 }
 
@@ -182,23 +182,19 @@ const fn align(l: u64) -> u64 {
 #[derive(Debug)]
 pub struct WalFullError;
 
-impl WalReader {
+impl Wal {
     pub fn open(p: &Path, layout: FragLayout) -> io::Result<Arc<Self>> {
         layout.assert_layout();
-        let file = OpenOptions::new().read(true).open(p)?;
-        let file_len = file.metadata()?.len();
-        if file_len < layout.frag_size {
-            // todo - error instead of panic
-            panic!(
-                "File len({file_len}) is less the frag size({})",
-                layout.frag_size
-            );
-        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(p)?;
         Ok(Self::from_file(file, layout))
     }
 
     fn from_file(file: File, layout: FragLayout) -> Arc<Self> {
-        let reader = WalReader {
+        let reader = Wal {
             file,
             layout,
             maps: Default::default(),
@@ -234,13 +230,13 @@ impl WalIterator {
         Ok((position, frame))
     }
 
-    pub fn into_writer(self) -> Wal {
+    pub fn into_writer(self) -> WalWriter {
         let position = AtomicFragPosition {
             position: Arc::new(AtomicU64::new(self.position)),
             layout: self.layout,
         };
-        Wal {
-            reader: self.reader,
+        WalWriter {
+            wal: self.wal,
             map: self.map,
             position,
         }
@@ -303,7 +299,7 @@ mod tests {
             frag_size: 1024,
             map_size: 1024,
         };
-        let wal = Wal::open(&file, layout).unwrap().into_writer();
+        let wal = WalWriter::open(&file, layout).unwrap().into_writer();
         let reader = wal.reader();
         let pos = wal.write(&PreparedWalWrite::new(&vec![1, 2, 3])).unwrap();
         let data = reader.read(pos).unwrap();
@@ -323,7 +319,7 @@ mod tests {
             frag_size: 2048,
             map_size: 1024,
         };
-        let mut wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
         assert_bytes(&[1, 2, 3], wal.next());
         assert_bytes(&[], wal.next());
         assert_bytes(&large, wal.next());
@@ -337,21 +333,21 @@ mod tests {
         assert_eq!(&[91, 92, 93], data.as_ref());
         drop(wal);
         drop(reader);
-        let mut wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
         assert_bytes(&[1, 2, 3], wal.next());
         assert_bytes(&[], wal.next());
         assert_bytes(&large, wal.next());
         assert_bytes(&[91, 92, 93], wal.next());
         wal.next().expect_err("Error expected");
         drop(wal);
-        let mut wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut wal = WalWriter::open(&file, layout.clone()).unwrap();
         let p1 = wal.next().unwrap().0;
         let p2 = wal.next().unwrap().0;
         let p3 = wal.next().unwrap().0;
         let p4 = wal.next().unwrap().0;
         wal.next().expect_err("Error expected");
         drop(wal);
-        let reader = WalReader::open(&file, layout.clone()).unwrap();
+        let reader = Wal::open(&file, layout.clone()).unwrap();
         assert_eq!(&[1, 2, 3], reader.read(p1).unwrap().as_ref());
         assert_eq!(&[] as &[u8], reader.read(p2).unwrap().as_ref());
         assert_eq!(&large, reader.read(p3).unwrap().as_ref());
