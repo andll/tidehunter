@@ -2,8 +2,10 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use bytes::{Buf, BufMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,7 +25,8 @@ pub enum WalReader {
 
 struct PartialWalReader {
     file: File,
-    maps: Mutex<BTreeMap<u32, Bytes>>,
+    layout: FragLayout,
+    maps: Mutex<BTreeMap<u64, Bytes>>,
 }
 
 pub struct WalIterator {
@@ -151,8 +154,8 @@ impl FragLayout {
             "Entry({len_aligned}) is larger then map_size({})",
             self.map_size
         );
-        let map_start = pos / self.map_size;
-        let map_end = (pos + len_aligned - 1) / self.map_size;
+        let map_start = self.position_map(pos);
+        let map_end = self.position_map(pos + len_aligned - 1);
         if map_start != map_end {
             pos = (map_start + 1) * self.map_size;
         }
@@ -161,6 +164,19 @@ impl FragLayout {
         } else {
             Some(pos)
         }
+    }
+
+    /// Return number of a mapping for position
+    fn position_map(&self, pos: u64) -> u64 {
+        pos / self.map_size
+    }
+
+    /// Return range of a particular mapping
+    fn map_range(&self, map: u64) -> Range<u64> {
+        let start = self.map_size * map;
+        let end = self.map_size * (map + 1);
+        assert!(end <= self.frag_size);
+        start..end
     }
 }
 
@@ -172,26 +188,32 @@ const fn align<const A: u64>(l: u64) -> u64 {
 pub struct WalFullError;
 
 impl WalReader {
-    pub fn read(&self, pos: FragPosition) -> Result<Bytes, CrcReadError> {
+    pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
         match self {
-            WalReader::Whole(map) => CrcFrame::read_from_checked_with_len(map, pos.0 as usize),
+            WalReader::Whole(map) => Ok(CrcFrame::read_from_checked_with_len(map, pos.0 as usize)?),
             WalReader::Partial(partial) => partial.read(pos),
         }
     }
 }
 
 impl PartialWalReader {
-    pub fn read(&self, pos: FragPosition) -> Result<Bytes, CrcReadError> {
-        unimplemented!()
-        // let maps = self.maps.lock();
-        // if let Some((start, map)) = maps.range(..pos.0).last() {
-        //     let start = *start as usize;
-        //     let end = start + map.len();
-        //     let pos = pos.0 as usize;
-        //     if pos + CrcFrame::CRC_LEN_HEADER_LENGTH <= end {
-        //
-        //     }
-        // }
+    pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
+        let map = self.layout.position_map(pos.0 as u64);
+        let mut maps = self.maps.lock();
+        let b = match maps.entry(map) {
+            Entry::Vacant(va) => {
+                let range = self.layout.map_range(map);
+                let mmap = unsafe {
+                    memmap2::MmapOptions::new()
+                        .offset(range.start)
+                        .len(self.layout.map_size as usize)
+                        .map(&self.file)?
+                };
+                va.insert(mmap.into())
+            }
+            Entry::Occupied(oc) => oc.into_mut(),
+        };
+        Ok(CrcFrame::read_from_checked_with_len(b, pos.0 as usize)?)
     }
 }
 
@@ -236,6 +258,25 @@ impl FragPosition {
 
     pub fn read_from_buf(buf: &mut impl Buf) -> Self {
         Self(buf.get_u32())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum WalReadError {
+    Io(io::Error),
+    Crc(CrcReadError),
+}
+
+impl From<CrcReadError> for WalReadError {
+    fn from(value: CrcReadError) -> Self {
+        Self::Crc(value)
+    }
+}
+
+impl From<io::Error> for WalReadError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
     }
 }
 
