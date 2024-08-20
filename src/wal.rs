@@ -13,23 +13,19 @@ use std::{io, mem};
 
 #[derive(Clone)]
 pub struct Wal {
+    reader: Arc<WalReader>,
     map: Bytes,
     position: AtomicFragPosition,
 }
 
-#[derive(Clone)]
-pub enum WalReader {
-    Whole(Bytes),
-    Partial(Arc<PartialWalReader>),
-}
-
-struct PartialWalReader {
+struct WalReader {
     file: File,
     layout: FragLayout,
     maps: Mutex<BTreeMap<u64, Bytes>>,
 }
 
 pub struct WalIterator {
+    reader: Arc<WalReader>,
     map: Bytes,
     position: u64,
     layout: FragLayout,
@@ -53,7 +49,9 @@ impl Wal {
                 .map_mut(&file)?
         };
         let map = map.into();
+        let reader = WalReader::from_file(file, layout.clone());
         let iterator = WalIterator {
+            reader,
             map,
             position: 0,
             layout,
@@ -81,9 +79,8 @@ impl Wal {
         Ok(FragPosition(pos as u32))
     }
 
-    pub fn reader(&self) -> WalReader {
-        let map = self.map.clone();
-        WalReader::Whole(map)
+    pub fn reader(&self) -> Arc<WalReader> {
+        self.reader.clone()
     }
 }
 
@@ -186,7 +183,7 @@ const fn align(l: u64) -> u64 {
 pub struct WalFullError;
 
 impl WalReader {
-    pub fn open_partial_reader(p: &Path, layout: FragLayout) -> io::Result<Self> {
+    pub fn open(p: &Path, layout: FragLayout) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let file = OpenOptions::new().read(true).open(p)?;
         let file_len = file.metadata()?.len();
@@ -197,24 +194,18 @@ impl WalReader {
                 layout.frag_size
             );
         }
-        let reader = PartialWalReader {
+        Ok(Self::from_file(file, layout))
+    }
+
+    fn from_file(file: File, layout: FragLayout) -> Arc<Self> {
+        let reader = WalReader {
             file,
             layout,
             maps: Default::default(),
         };
-        let reader = Arc::new(reader);
-        Ok(Self::Partial(reader))
+        Arc::new(reader)
     }
 
-    pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
-        match self {
-            WalReader::Whole(map) => Ok(CrcFrame::read_from_checked_with_len(map, pos.0 as usize)?),
-            WalReader::Partial(partial) => partial.read(pos),
-        }
-    }
-}
-
-impl PartialWalReader {
     pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
         let (map, offset) = self.layout.locate(pos.0 as u64);
         let mut maps = self.maps.lock();
@@ -249,6 +240,7 @@ impl WalIterator {
             layout: self.layout,
         };
         Wal {
+            reader: self.reader,
             map: self.map,
             position,
         }
@@ -359,7 +351,7 @@ mod tests {
         let p4 = wal.next().unwrap().0;
         wal.next().expect_err("Error expected");
         drop(wal);
-        let reader = WalReader::open_partial_reader(&file, layout.clone()).unwrap();
+        let reader = WalReader::open(&file, layout.clone()).unwrap();
         assert_eq!(&[1, 2, 3], reader.read(p1).unwrap().as_ref());
         assert_eq!(&[] as &[u8], reader.read(p2).unwrap().as_ref());
         assert_eq!(&large, reader.read(p3).unwrap().as_ref());
