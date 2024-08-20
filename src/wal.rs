@@ -40,26 +40,7 @@ pub struct FragPosition(u32);
 
 impl Wal {
     pub fn open(p: &impl AsRef<Path>, layout: FragLayout) -> io::Result<WalIterator> {
-        assert!(layout.frag_size <= u32::MAX as u64, "Frag size too large");
-        assert!(
-            layout.map_size <= layout.frag_size,
-            "Map size larger then frag size"
-        );
-        assert_eq!(
-            (layout.frag_size / layout.map_size) * layout.map_size,
-            layout.frag_size,
-            "Frag size should be divisible by map size"
-        );
-        assert_eq!(
-            layout.frag_size,
-            Self::align(layout.frag_size),
-            "Frag size not aligned"
-        );
-        assert_eq!(
-            layout.map_size,
-            Self::align(layout.map_size),
-            "Map size not aligned"
-        );
+        layout.assert_layout();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -82,7 +63,7 @@ impl Wal {
 
     pub fn write(&self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
         let len = w.frame.len_with_header() as u64;
-        let len_aligned = Self::align(len);
+        let len_aligned = align(len);
         let Some(pos) = self.position.allocate_position(len_aligned) else {
             return Err(WalFullError);
         };
@@ -103,10 +84,6 @@ impl Wal {
     pub fn reader(&self) -> WalReader {
         let map = self.map.clone();
         WalReader::Whole(map)
-    }
-
-    fn align(l: u64) -> u64 {
-        align::<8>(l)
     }
 }
 
@@ -145,6 +122,25 @@ pub struct FragLayout {
 }
 
 impl FragLayout {
+    fn assert_layout(&self) {
+        assert!(self.frag_size <= u32::MAX as u64, "Frag size too large");
+        assert!(
+            self.map_size <= self.frag_size,
+            "Map size larger then frag size"
+        );
+        assert_eq!(
+            (self.frag_size / self.map_size) * self.map_size,
+            self.frag_size,
+            "Frag size should be divisible by map size"
+        );
+        assert_eq!(
+            self.frag_size,
+            align(self.frag_size),
+            "Frag size not aligned"
+        );
+        assert_eq!(self.map_size, align(self.map_size), "Map size not aligned")
+    }
+
     /// Allocate the next position.
     /// Block should not cross the map boundary defined by the self.map_size
     /// End of the block should not exceed self.frag_size (returns None otherwise)
@@ -154,8 +150,8 @@ impl FragLayout {
             "Entry({len_aligned}) is larger then map_size({})",
             self.map_size
         );
-        let map_start = self.position_map(pos);
-        let map_end = self.position_map(pos + len_aligned - 1);
+        let map_start = self.locate(pos).0;
+        let map_end = self.locate(pos + len_aligned - 1).0;
         if map_start != map_end {
             pos = (map_start + 1) * self.map_size;
         }
@@ -166,9 +162,10 @@ impl FragLayout {
         }
     }
 
-    /// Return number of a mapping for position
-    fn position_map(&self, pos: u64) -> u64 {
-        pos / self.map_size
+    /// Return number of a mapping and offset inside the mapping for given position
+    #[inline]
+    fn locate(&self, pos: u64) -> (u64, u64) {
+        (pos / self.map_size, pos % self.map_size)
     }
 
     /// Return range of a particular mapping
@@ -180,14 +177,35 @@ impl FragLayout {
     }
 }
 
-const fn align<const A: u64>(l: u64) -> u64 {
-    (l + A - 1) / A * A
+const fn align(l: u64) -> u64 {
+    const ALIGN: u64 = 8;
+    (l + ALIGN - 1) / ALIGN * ALIGN
 }
 
 #[derive(Debug)]
 pub struct WalFullError;
 
 impl WalReader {
+    pub fn open_partial_reader(p: &Path, layout: FragLayout) -> io::Result<Self> {
+        layout.assert_layout();
+        let file = OpenOptions::new().read(true).open(p)?;
+        let file_len = file.metadata()?.len();
+        if file_len < layout.frag_size {
+            // todo - error instead of panic
+            panic!(
+                "File len({file_len}) is less the frag size({})",
+                layout.frag_size
+            );
+        }
+        let reader = PartialWalReader {
+            file,
+            layout,
+            maps: Default::default(),
+        };
+        let reader = Arc::new(reader);
+        Ok(Self::Partial(reader))
+    }
+
     pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
         match self {
             WalReader::Whole(map) => Ok(CrcFrame::read_from_checked_with_len(map, pos.0 as usize)?),
@@ -198,7 +216,7 @@ impl WalReader {
 
 impl PartialWalReader {
     pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
-        let map = self.layout.position_map(pos.0 as u64);
+        let (map, offset) = self.layout.locate(pos.0 as u64);
         let mut maps = self.maps.lock();
         let b = match maps.entry(map) {
             Entry::Vacant(va) => {
@@ -213,15 +231,16 @@ impl PartialWalReader {
             }
             Entry::Occupied(oc) => oc.into_mut(),
         };
-        Ok(CrcFrame::read_from_checked_with_len(b, pos.0 as usize)?)
+        Ok(CrcFrame::read_from_checked_with_len(b, offset as usize)?)
     }
 }
 
 impl WalIterator {
-    pub fn next(&mut self) -> Result<Bytes, CrcReadError> {
+    pub fn next(&mut self) -> Result<(FragPosition, Bytes), CrcReadError> {
+        let position = FragPosition(self.position as u32);
         let frame = CrcFrame::read_from_checked_with_len(&self.map, self.position as usize)?;
-        self.position += Wal::align((frame.len() + CrcFrame::CRC_LEN_HEADER_LENGTH) as u64);
-        Ok(frame)
+        self.position += align((frame.len() + CrcFrame::CRC_LEN_HEADER_LENGTH) as u64);
+        Ok((position, frame))
     }
 
     pub fn into_writer(self) -> Wal {
@@ -310,7 +329,7 @@ mod tests {
         drop(reader);
         let layout = FragLayout {
             frag_size: 2048,
-            map_size: 2048,
+            map_size: 1024,
         };
         let mut wal = Wal::open(&file, layout.clone()).unwrap();
         assert_bytes(&[1, 2, 3], wal.next());
@@ -326,12 +345,25 @@ mod tests {
         assert_eq!(&[91, 92, 93], data.as_ref());
         drop(wal);
         drop(reader);
-        let mut wal = Wal::open(&file, layout).unwrap();
+        let mut wal = Wal::open(&file, layout.clone()).unwrap();
         assert_bytes(&[1, 2, 3], wal.next());
         assert_bytes(&[], wal.next());
         assert_bytes(&large, wal.next());
         assert_bytes(&[91, 92, 93], wal.next());
         wal.next().expect_err("Error expected");
+        drop(wal);
+        let mut wal = Wal::open(&file, layout.clone()).unwrap();
+        let p1 = wal.next().unwrap().0;
+        let p2 = wal.next().unwrap().0;
+        let p3 = wal.next().unwrap().0;
+        let p4 = wal.next().unwrap().0;
+        wal.next().expect_err("Error expected");
+        drop(wal);
+        let reader = WalReader::open_partial_reader(&file, layout.clone()).unwrap();
+        assert_eq!(&[1, 2, 3], reader.read(p1).unwrap().as_ref());
+        assert_eq!(&[] as &[u8], reader.read(p2).unwrap().as_ref());
+        assert_eq!(&large, reader.read(p3).unwrap().as_ref());
+        assert_eq!(&[91, 92, 93], reader.read(p4).unwrap().as_ref());
     }
 
     #[test]
@@ -355,18 +387,18 @@ mod tests {
 
     #[test]
     fn test_align() {
-        assert_eq!(Wal::align(1), 8);
-        assert_eq!(Wal::align(4), 8);
-        assert_eq!(Wal::align(7), 8);
-        assert_eq!(Wal::align(0), 0);
-        assert_eq!(Wal::align(8), 8);
-        assert_eq!(Wal::align(15), 16);
-        assert_eq!(Wal::align(16), 16);
+        assert_eq!(align(1), 8);
+        assert_eq!(align(4), 8);
+        assert_eq!(align(7), 8);
+        assert_eq!(align(0), 0);
+        assert_eq!(align(8), 8);
+        assert_eq!(align(15), 16);
+        assert_eq!(align(16), 16);
     }
 
     #[track_caller]
-    fn assert_bytes(e: &[u8], v: Result<Bytes, CrcReadError>) {
+    fn assert_bytes(e: &[u8], v: Result<(FragPosition, Bytes), CrcReadError>) {
         let v = v.expect("Expected value, bot nothing");
-        assert_eq!(e, v.as_ref());
+        assert_eq!(e, v.1.as_ref());
     }
 }
