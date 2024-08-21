@@ -35,6 +35,7 @@ pub struct WalIterator {
 struct Map {
     id: u64,
     data: Bytes,
+    writeable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -59,7 +60,7 @@ impl WalWriter {
             }
             // todo put skip marker
             self.wal.extend_to_map(map_id)?;
-            *map = self.wal.map(map_id)?;
+            *map = self.wal.map(map_id, true)?;
         } else {
             assert_eq!(pos, prev_block_end);
         }
@@ -170,7 +171,7 @@ impl Wal {
 
     pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         let (map, offset) = self.layout.locate(pos.0);
-        let map = self.map(map)?;
+        let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
         Ok(CrcFrame::read_from_checked_with_len(
             &map.data,
@@ -178,25 +179,30 @@ impl Wal {
         )?)
     }
 
-    fn map(&self, id: u64) -> io::Result<Map> {
+    fn map(&self, id: u64, write: bool) -> io::Result<Map> {
         let mut maps = self.maps.lock();
         let b = match maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
                 let mmap = unsafe {
-                    // todo - some mappings can be read-only
-                    memmap2::MmapOptions::new()
+                    let mut options = memmap2::MmapOptions::new();
+                    options
                         .offset(range.start)
-                        .len(self.layout.frag_size as usize)
-                        .map_mut(&self.file)?
+                        .len(self.layout.frag_size as usize);
+                    if write {
+                        options.populate().map_mut(&self.file)?.into()
+                    } else {
+                        options.map(&self.file)?.into()
+                    }
                 };
-                va.insert(mmap.into())
+                va.insert(mmap)
             }
             Entry::Occupied(oc) => oc.into_mut(),
         };
         let map = Map {
             id,
             data: b.clone(),
+            writeable: write,
         };
         Ok(map)
     }
@@ -214,7 +220,7 @@ impl Wal {
     pub fn wal_iterator(self: &Arc<Self>, position: WalPosition) -> io::Result<WalIterator> {
         let (map_id, _) = self.layout.locate(position.0);
         self.extend_to_map(map_id)?;
-        let map = self.map(map_id)?;
+        let map = self.map(map_id, true)?;
         Ok(WalIterator {
             wal: self.clone(),
             position: position.0,
@@ -244,7 +250,7 @@ impl WalIterator {
         let (map_id, offset) = self.wal.layout.locate(self.position);
         if self.map.id != map_id {
             self.wal.extend_to_map(map_id)?;
-            self.map = self.wal.map(map_id)?;
+            self.map = self.wal.map(map_id, true)?;
         }
         Ok(CrcFrame::read_from_checked_with_len(
             &self.map.data,
@@ -267,6 +273,7 @@ impl WalIterator {
 
 impl Map {
     pub fn write_buf_at(&self, offset: usize, len: usize) -> &mut [u8] {
+        assert!(self.writeable, "Attempt to write into read-only map");
         unsafe {
             #[allow(mutable_transmutes)] // is there a better way?
             mem::transmute::<&[u8], &mut [u8]>(&self.data[offset..offset + len])
