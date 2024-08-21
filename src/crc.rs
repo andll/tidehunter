@@ -86,7 +86,7 @@ impl CrcFrame {
         }
     }
 
-    fn skip_marker() -> Self {
+    pub fn skip_marker() -> Self {
         Self {
             bytes: vec![0xff; 8].into(),
         }
