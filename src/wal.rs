@@ -1,5 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use bytes::{Buf, BufMut};
+use memmap2::{Mmap, MmapMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::btree_map::Entry;
@@ -227,6 +228,18 @@ impl Wal {
             map,
         })
     }
+
+    // Attempts cleaning internal mem maps, returning number of retained maps
+    // Map can be freed when all buffers linked to this portion of a file are dropped
+    pub fn cleanup(&self) -> usize {
+        let mut maps = self.maps.lock();
+        maps.retain(|_k, v| {
+            v.downcast_mut::<Mmap>().is_none() &&
+            // todo maybe don't put writeable maps into self.maps?
+            v.downcast_mut::<MmapMut>().is_none()
+        });
+        maps.len()
+    }
 }
 
 impl WalIterator {
@@ -379,7 +392,11 @@ mod tests {
             let p3 = assert_bytes(&large, wal_iterator.next());
             let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
+            // wal_iterator holds the reference to mapping, so can't clean all of them
+            assert_eq!(wal.cleanup(), 1);
             drop(wal_iterator);
+            // after wal_iterator is dropped, cleanup should free all memory
+            assert_eq!(wal.cleanup(), 0);
             drop(wal);
             let wal = Wal::open(&file, layout.clone()).unwrap();
             assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
