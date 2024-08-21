@@ -14,7 +14,7 @@ use std::{io, mem};
 #[derive(Clone)]
 pub struct WalWriter {
     wal: Arc<Wal>,
-    map: Bytes,
+    map: Map,
     position: AtomicFragPosition,
 }
 
@@ -26,32 +26,42 @@ struct Wal {
 
 pub struct WalIterator {
     wal: Arc<Wal>,
-    map: Bytes,
+    map: Map,
     position: u64,
 }
 
+#[derive(Clone)]
+struct Map {
+    id: u64,
+    data: Bytes,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct FragPosition(u32);
+pub struct FragPosition(u64);
 
 impl WalWriter {
-    pub fn write(&self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
+    pub fn write(&mut self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
-        let Some(pos) = self.position.allocate_position(len_aligned) else {
-            return Err(WalFullError);
-        };
+        let pos = self.position.allocate_position(len_aligned);
+        // todo duplicated code
+        let (map_id, offset) = self.wal.layout.locate(pos);
+        if self.map.id != map_id {
+            // todo put skip marker
+            self.map = self.wal.map(map_id).unwrap(); // todo fix unwrap
+        }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
         let buf = unsafe {
-            let pos = pos as usize;
+            let offset = offset as usize;
             let len = len as usize;
             #[allow(mutable_transmutes)] // is there a better way?
-            mem::transmute::<&[u8], &mut [u8]>(&self.map[pos..pos + len])
+            mem::transmute::<&[u8], &mut [u8]>(&self.map.data[offset..offset + len])
         };
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
-        Ok(FragPosition(pos as u32))
+        Ok(FragPosition(pos))
     }
 }
 
@@ -63,23 +73,18 @@ struct AtomicFragPosition {
 
 impl AtomicFragPosition {
     /// Allocate new position according to layout or None if ran out of space
-    pub fn allocate_position(&self, len_aligned: u64) -> Option<u64> {
+    pub fn allocate_position(&self, len_aligned: u64) -> u64 {
         assert!(len_aligned > 0);
         let mut position: Option<u64> = None;
         // todo aggressive multi-thread test for this
         self.position
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |pos| {
                 let pos = self.layout.next_position(pos, len_aligned);
-                if let Some(pos) = pos {
-                    position = Some(pos);
-                    Some(pos + len_aligned)
-                } else {
-                    position = None;
-                    None
-                }
+                position = Some(pos);
+                Some(pos + len_aligned)
             })
             .ok();
-        position
+        position.unwrap()
     }
 }
 
@@ -100,8 +105,7 @@ impl FragLayout {
 
     /// Allocate the next position.
     /// Block should not cross the map boundary defined by the self.frag_size
-    /// End of the block should not exceed self.frag_size (returns None otherwise)
-    fn next_position(&self, mut pos: u64, len_aligned: u64) -> Option<u64> {
+    fn next_position(&self, mut pos: u64, len_aligned: u64) -> u64 {
         assert!(
             len_aligned <= self.frag_size,
             "Entry({len_aligned}) is larger then frag_size({})",
@@ -112,11 +116,7 @@ impl FragLayout {
         if map_start != map_end {
             pos = (map_start + 1) * self.frag_size;
         }
-        if pos + len_aligned > self.frag_size {
-            None
-        } else {
-            Some(pos)
-        }
+        pos
     }
 
     /// Return number of a mapping and offset inside the mapping for given position
@@ -129,7 +129,6 @@ impl FragLayout {
     fn map_range(&self, map: u64) -> Range<u64> {
         let start = self.frag_size * map;
         let end = self.frag_size * (map + 1);
-        assert!(end <= self.frag_size);
         start..end
     }
 }
@@ -164,17 +163,20 @@ impl Wal {
     }
 
     pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
-        let (map, offset) = self.layout.locate(pos.0 as u64);
+        let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map)?;
         // todo avoid clone, introduce Bytes::slice_in_place
-        Ok(CrcFrame::read_from_checked_with_len(&map, offset as usize)?)
+        Ok(CrcFrame::read_from_checked_with_len(
+            &map.data,
+            offset as usize,
+        )?)
     }
 
-    fn map(&self, map: u64) -> io::Result<Bytes> {
+    fn map(&self, id: u64) -> io::Result<Map> {
         let mut maps = self.maps.lock();
-        let b = match maps.entry(map) {
+        let b = match maps.entry(id) {
             Entry::Vacant(va) => {
-                let range = self.layout.map_range(map);
+                let range = self.layout.map_range(id);
                 let mmap = unsafe {
                     // todo - some mappings can be read-only
                     memmap2::MmapOptions::new()
@@ -186,7 +188,11 @@ impl Wal {
             }
             Entry::Occupied(oc) => oc.into_mut(),
         };
-        Ok(b.clone())
+        let map = Map {
+            id,
+            data: b.clone(),
+        };
+        Ok(map)
     }
 
     pub fn wal_iterator(self: &Arc<Self>) -> WalIterator {
@@ -205,8 +211,14 @@ impl Wal {
 
 impl WalIterator {
     pub fn next(&mut self) -> Result<(FragPosition, Bytes), CrcReadError> {
-        let position = FragPosition(self.position as u32);
-        let frame = CrcFrame::read_from_checked_with_len(&self.map, self.position as usize)?;
+        // todo duplicated code
+        let (map_id, offset) = self.wal.layout.locate(self.position);
+        if self.map.id != map_id {
+            // todo handle skip marker
+            self.map = self.wal.map(map_id).unwrap(); // todo fix unwrap
+        }
+        let frame = CrcFrame::read_from_checked_with_len(&self.map.data, offset as usize)?;
+        let position = FragPosition(self.position);
         self.position += align((frame.len() + CrcFrame::CRC_LEN_HEADER_LENGTH) as u64);
         Ok((position, frame))
     }
@@ -236,16 +248,16 @@ impl PreparedWalWrite {
 }
 
 impl FragPosition {
-    pub const INVALID: FragPosition = FragPosition(u32::MAX);
+    pub const INVALID: FragPosition = FragPosition(u64::MAX);
     #[cfg(test)]
     pub const TEST: FragPosition = FragPosition(3311);
 
     pub fn write_to_buf(&self, buf: &mut impl BufMut) {
-        buf.put_u32(self.0);
+        buf.put_u64(self.0);
     }
 
     pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self(buf.get_u32())
+        Self(buf.get_u64())
     }
 }
 
@@ -277,8 +289,8 @@ mod tests {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let file = dir.path().join("wal");
         let layout = FragLayout { frag_size: 1024 };
-        let wal = Wal::open(&file, layout).unwrap();
-        let writer = wal.writer();
+        let wal = Wal::open(&file, layout.clone()).unwrap();
+        let mut writer = wal.writer();
         let pos = writer
             .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
             .unwrap();
@@ -291,18 +303,15 @@ mod tests {
         let pos = writer.write(&PreparedWalWrite::new(&large)).unwrap();
         let data = wal.read(pos).unwrap();
         assert_eq!(&large, data.as_ref());
-        let err = writer.write(&PreparedWalWrite::new(&vec![]));
-        err.expect_err("Must fail");
         drop(writer);
         drop(wal);
-        let layout = FragLayout { frag_size: 2048 };
         let wal = Wal::open(&file, layout.clone()).unwrap();
         let mut wal_iterator = wal.wal_iterator();
         assert_bytes(&[1, 2, 3], wal_iterator.next());
         assert_bytes(&[], wal_iterator.next());
         assert_bytes(&large, wal_iterator.next());
         wal_iterator.next().expect_err("Error expected");
-        let writer = wal_iterator.into_writer();
+        let mut writer = wal_iterator.into_writer();
         let pos = writer
             .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
             .unwrap();
@@ -332,15 +341,14 @@ mod tests {
             layout,
             position: Arc::new(AtomicU64::new(0)),
         };
-        assert_eq!(Some(0), position.allocate_position(16));
-        assert_eq!(Some(16), position.allocate_position(8));
-        assert_eq!(Some(24), position.allocate_position(8));
-        assert_eq!(Some(32), position.allocate_position(104));
-        assert_eq!(Some(136), position.allocate_position(128));
-        assert_eq!(Some(264), position.allocate_position(240));
-        assert_eq!(None, position.allocate_position(9)); // just one over 8 bytes left
-        assert_eq!(Some(512 - 8), position.allocate_position(8));
-        assert_eq!(None, position.allocate_position(1)); // just one over 8 bytes left
+        assert_eq!(0, position.allocate_position(16));
+        assert_eq!(16, position.allocate_position(8));
+        assert_eq!(24, position.allocate_position(8));
+        assert_eq!(32, position.allocate_position(104));
+        assert_eq!(136, position.allocate_position(128));
+        assert_eq!(264, position.allocate_position(240));
+        assert_eq!(512, position.allocate_position(16));
+        assert_eq!(512 + 16, position.allocate_position(32));
     }
 
     #[test]
