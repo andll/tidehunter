@@ -1,4 +1,4 @@
-use crate::wal::FragLayout;
+use crate::wal::WalLayout;
 
 pub struct Config {
     frag_size: u64,
@@ -30,8 +30,8 @@ impl Config {
         self.frag_size
     }
 
-    pub fn frag_layout(&self) -> FragLayout {
-        FragLayout {
+    pub fn wal_layout(&self) -> WalLayout {
+        WalLayout {
             frag_size: self.frag_size,
         }
     }

@@ -15,12 +15,12 @@ use std::{io, mem};
 pub struct WalWriter {
     wal: Arc<Wal>,
     map: Map,
-    position: AtomicFragPosition,
+    position: AtomicWalPosition,
 }
 
 pub struct Wal {
     file: File,
-    layout: FragLayout,
+    layout: WalLayout,
     maps: Mutex<BTreeMap<u64, Bytes>>,
 }
 
@@ -73,12 +73,12 @@ impl WalWriter {
 }
 
 #[derive(Clone)]
-struct AtomicFragPosition {
+struct AtomicWalPosition {
     position: Arc<AtomicU64>,
-    layout: FragLayout,
+    layout: WalLayout,
 }
 
-impl AtomicFragPosition {
+impl AtomicWalPosition {
     /// Allocate new position according to layout
     ///
     /// Returns new position and then end of previous block
@@ -98,11 +98,11 @@ impl AtomicFragPosition {
 }
 
 #[derive(Clone)]
-pub struct FragLayout {
+pub struct WalLayout {
     pub(crate) frag_size: u64,
 }
 
-impl FragLayout {
+impl WalLayout {
     fn assert_layout(&self) {
         assert!(self.frag_size <= u32::MAX as u64, "Frag size too large");
         assert_eq!(
@@ -151,7 +151,7 @@ const fn align(l: u64) -> u64 {
 pub struct WalFullError;
 
 impl Wal {
-    pub fn open(p: &Path, layout: FragLayout) -> io::Result<Arc<Self>> {
+    pub fn open(p: &Path, layout: WalLayout) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let file = OpenOptions::new()
             .create(true)
@@ -161,7 +161,7 @@ impl Wal {
         Ok(Self::from_file(file, layout))
     }
 
-    fn from_file(file: File, layout: FragLayout) -> Arc<Self> {
+    fn from_file(file: File, layout: WalLayout) -> Arc<Self> {
         let reader = Wal {
             file,
             layout,
@@ -258,7 +258,7 @@ impl WalIterator {
     }
 
     pub fn into_writer(self) -> WalWriter {
-        let position = AtomicFragPosition {
+        let position = AtomicWalPosition {
             position: Arc::new(AtomicU64::new(self.position)),
             layout: self.wal.layout.clone(),
         };
@@ -334,7 +334,7 @@ mod tests {
     fn test_wal() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let file = dir.path().join("wal");
-        let layout = FragLayout { frag_size: 1024 };
+        let layout = WalLayout { frag_size: 1024 };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_LEN_HEADER_LENGTH * 3 - 9];
         {
@@ -389,9 +389,9 @@ mod tests {
     }
 
     #[test]
-    fn test_atomic_frag_position() {
-        let layout = FragLayout { frag_size: 512 };
-        let position = AtomicFragPosition {
+    fn test_atomic_wal_position() {
+        let layout = WalLayout { frag_size: 512 };
+        let position = AtomicWalPosition {
             layout,
             position: Arc::new(AtomicU64::new(0)),
         };

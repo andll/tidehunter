@@ -32,7 +32,7 @@ impl Db {
             Self::read_control_region(&cr_map, config)?
         };
         let large_table = LargeTable::from_unloaded(control_region.snapshot());
-        let wal = Wal::open(&path.join("wal"), config.frag_layout())?;
+        let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         Ok(Self {
             cr_map,
             large_table,
