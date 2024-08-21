@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut};
 use memmap2::{Mmap, MmapMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -39,7 +40,7 @@ struct Map {
     writeable: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
 
 impl WalWriter {
@@ -281,6 +282,10 @@ impl WalIterator {
             map: Arc::new(Mutex::new(self.map)),
             position,
         }
+    }
+
+    pub fn wal(&self) -> &Wal {
+        &self.wal
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, IntoBytesFixed};
-use crate::large_table::LargeTable;
+use crate::large_table::{IndexTable, LargeTable, Loader};
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalWriter};
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
@@ -19,6 +19,8 @@ pub struct Db {
 }
 
 pub type DbResult<T> = Result<T, DbError>;
+
+pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 
 impl Db {
     pub fn open(path: &Path, config: &Config) -> DbResult<Self> {
@@ -71,15 +73,25 @@ impl Db {
     }
 
     pub fn insert(&self, k: Bytes, v: Bytes) -> DbResult<()> {
+        assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
-        Self::insert_into_large_table(&self.large_table, k, position);
+        self.large_table.insert(k, position, &*self.wal)?;
         Ok(())
     }
 
-    fn insert_into_large_table(large_table: &LargeTable, k: Bytes, position: WalPosition) {
-        // todo load unloaded
-        large_table.insert(k, position);
+    pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
+        let Some(position) = self.large_table.get(k, &*self.wal)? else {
+            return Ok(None);
+        };
+        let entry = Self::read_entry(&self.wal, position)?;
+        let value = if let WalEntry::Record(wal_key, v) = entry {
+            debug_assert_eq!(wal_key.as_ref(), k);
+            v
+        } else {
+            panic!("Unexpected wal entry where expected record");
+        };
+        Ok(Some(value))
     }
 
     fn replay_wal(large_table: &LargeTable, mut wal_iterator: WalIterator) -> DbResult<WalWriter> {
@@ -92,31 +104,38 @@ impl Db {
             let entry = WalEntry::from_bytes(entry);
             match entry {
                 WalEntry::Record(k, _v) => {
-                    Self::insert_into_large_table(large_table, k, position);
+                    large_table.insert(k, position, wal_iterator.wal())?;
+                }
+                WalEntry::Index(_bytes) => {
+                    // todo - handle this by updating large table to Loaded()
                 }
             }
         }
     }
 
-    pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
-        // todo load unloaded
-        let Some(position) = self.large_table.get(k) else {
-            return Ok(None);
-        };
-        let entry = self.wal.read(position)?;
-        let entry = WalEntry::from_bytes(entry);
-        let value = if let WalEntry::Record(wal_key, v) = entry {
-            debug_assert_eq!(wal_key.as_ref(), k);
-            v
+    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
+        let entry = wal.read(position)?;
+        Ok(WalEntry::from_bytes(entry))
+    }
+}
+
+impl Loader for &Wal {
+    type Error = DbError;
+
+    fn load(self, position: WalPosition) -> DbResult<IndexTable> {
+        let entry = Db::read_entry(self, position)?;
+        if let WalEntry::Index(bytes) = entry {
+            let entry = bincode::deserialize(&bytes)?;
+            Ok(entry)
         } else {
             panic!("Unexpected wal entry where expected record");
-        };
-        Ok(Some(value))
+        }
     }
 }
 
 enum WalEntry {
     Record(Bytes, Bytes),
+    Index(Bytes),
 }
 
 #[derive(Debug)]
@@ -124,15 +143,26 @@ pub enum DbError {
     Io(io::Error),
     CrCorrupted,
     WalError(WalError),
+    CorruptedIndexEntry(bincode::Error),
 }
 
 impl WalEntry {
+    const WAL_ENTRY_RECORD: u16 = 1;
+    const WAL_ENTRY_INDEX: u16 = 2;
+
     pub fn from_bytes(bytes: Bytes) -> Self {
         let mut b = &bytes[..];
-        let key_len = b.get_u32() as usize;
-        let k = bytes.slice(4..4 + key_len);
-        let v = bytes.slice(4 + key_len..);
-        WalEntry::Record(k, v)
+        let entry_type = b.get_u16();
+        match entry_type {
+            WalEntry::WAL_ENTRY_RECORD => {
+                let key_len = b.get_u16() as usize;
+                let k = bytes.slice(4..4 + key_len);
+                let v = bytes.slice(4 + key_len..);
+                WalEntry::Record(k, v)
+            }
+            WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(2..)),
+            _ => panic!("Unknown wal entry type {entry_type}"),
+        }
     }
 }
 
@@ -140,15 +170,22 @@ impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
             WalEntry::Record(k, v) => 4 + k.len() + v.len(),
+            WalEntry::Index(index) => 2 + index.len(),
         }
     }
 
     fn write_into_bytes(&self, buf: &mut BytesMut) {
+        // todo avoid copy here
         match self {
             WalEntry::Record(k, v) => {
-                buf.put_u32(k.len() as u32);
+                buf.put_u16(Self::WAL_ENTRY_RECORD);
+                buf.put_u16(k.len() as u16);
                 buf.put_slice(&k);
                 buf.put_slice(&v);
+            }
+            WalEntry::Index(bytes) => {
+                buf.put_u16(Self::WAL_ENTRY_INDEX);
+                buf.put_slice(&bytes);
             }
         }
     }
@@ -163,6 +200,12 @@ impl From<io::Error> for DbError {
 impl From<WalError> for DbError {
     fn from(value: WalError) -> Self {
         Self::WalError(value)
+    }
+}
+
+impl From<bincode::Error> for DbError {
+    fn from(value: bincode::Error) -> Self {
+        Self::CorruptedIndexEntry(value)
     }
 }
 

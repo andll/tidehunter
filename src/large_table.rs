@@ -1,6 +1,7 @@
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 pub struct LargeTable {
     data: Box<[Mutex<LargeTableEntry>]>,
@@ -21,8 +22,8 @@ enum LargeTableEntryState {
     Dirty(Version),
 }
 
-#[derive(Clone)]
-struct IndexTable {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IndexTable {
     data: Vec<(Bytes, WalPosition)>,
 }
 
@@ -63,14 +64,19 @@ impl LargeTable {
         Self { data }
     }
 
-    pub fn insert(&self, k: Bytes, v: WalPosition) {
+    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: L) -> Result<(), L::Error> {
         let entry = self.entry(&k);
-        entry.lock().insert(k, v);
+        let mut entry = entry.lock();
+        entry.maybe_load(loader)?;
+        entry.insert(k, v);
+        Ok(())
     }
 
-    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
+    pub fn get<L: Loader>(&self, k: &[u8], loader: L) -> Result<Option<WalPosition>, L::Error> {
         let entry = self.entry(k);
-        entry.lock().get(k)
+        let mut entry = entry.lock();
+        entry.maybe_load(loader)?;
+        Ok(entry.get(k))
     }
 
     fn entry(&self, k: &[u8]) -> &Mutex<LargeTableEntry> {
@@ -90,6 +96,12 @@ impl LargeTable {
         let data = data.into_boxed_slice();
         LargeTableSnapshot { data }
     }
+}
+
+pub trait Loader {
+    type Error;
+
+    fn load(self, position: WalPosition) -> Result<IndexTable, Self::Error>;
 }
 
 impl LargeTableEntry {
@@ -121,6 +133,23 @@ impl LargeTableEntry {
         self.data.insert(k, v);
     }
 
+    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
+        if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
+            panic!("Can't get in unloaded state");
+        }
+        self.data.get(k)
+    }
+
+    pub fn maybe_load<L: Loader>(&mut self, loader: L) -> Result<(), L::Error> {
+        let LargeTableEntryState::Unloaded(position) = self.state else {
+            return Ok(());
+        };
+        let data = loader.load(position)?;
+        self.data = data;
+        self.state = LargeTableEntryState::Loaded(position);
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> LargeTableSnapshotEntry {
         match self.state {
             LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
@@ -130,13 +159,6 @@ impl LargeTableEntry {
                 LargeTableSnapshotEntry::Dirty(version, self.data.clone())
             }
         }
-    }
-
-    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
-        if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
-            panic!("Can't get in unloaded state");
-        }
-        self.data.get(k)
     }
 }
 
