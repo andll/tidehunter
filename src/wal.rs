@@ -18,7 +18,7 @@ pub struct WalWriter {
     position: AtomicFragPosition,
 }
 
-struct Wal {
+pub struct Wal {
     file: File,
     layout: FragLayout,
     maps: Mutex<BTreeMap<u64, Bytes>>,
@@ -37,10 +37,10 @@ struct Map {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct FragPosition(u64);
+pub struct WalPosition(u64);
 
 impl WalWriter {
-    pub fn write(&mut self, w: &PreparedWalWrite) -> Result<FragPosition, WalFullError> {
+    pub fn write(&mut self, w: &PreparedWalWrite) -> Result<WalPosition, WalFullError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
         let (pos, prev_block_end) = self.position.allocate_position(len_aligned);
@@ -68,7 +68,7 @@ impl WalWriter {
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
-        Ok(FragPosition(pos))
+        Ok(WalPosition(pos))
     }
 }
 
@@ -170,7 +170,7 @@ impl Wal {
         Arc::new(reader)
     }
 
-    pub fn read(&self, pos: FragPosition) -> Result<Bytes, WalReadError> {
+    pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalReadError> {
         let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map)?;
         // todo avoid clone, introduce Bytes::slice_in_place
@@ -229,7 +229,7 @@ impl Wal {
 }
 
 impl WalIterator {
-    pub fn next(&mut self) -> Result<(FragPosition, Bytes), WalReadError> {
+    pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalReadError> {
         let frame = self.read_one();
         let frame = if matches!(frame, Err(WalReadError::Crc(CrcReadError::SkipMarker))) {
             // handle skip marker - jump to next frag
@@ -239,7 +239,7 @@ impl WalIterator {
         } else {
             frame?
         };
-        let position = FragPosition(self.position);
+        let position = WalPosition(self.position);
         self.position += align((frame.len() + CrcFrame::CRC_LEN_HEADER_LENGTH) as u64);
         Ok((position, frame))
     }
@@ -290,10 +290,11 @@ impl PreparedWalWrite {
     }
 }
 
-impl FragPosition {
-    pub const INVALID: FragPosition = FragPosition(u64::MAX);
+impl WalPosition {
+    pub const INVALID: WalPosition = WalPosition(u64::MAX);
+    pub const LENGTH: usize = 8;
     #[cfg(test)]
-    pub const TEST: FragPosition = FragPosition(3311);
+    pub const TEST: WalPosition = WalPosition(3311);
 
     pub fn write_to_buf(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.0);
@@ -326,6 +327,7 @@ impl From<io::Error> for WalReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use std::fs;
 
     #[test]
@@ -415,8 +417,18 @@ mod tests {
         assert_eq!(align(16), 16);
     }
 
+    #[test]
+    fn test_position() {
+        let mut buf = BytesMut::new();
+        WalPosition::TEST.write_to_buf(&mut buf);
+        let bytes: bytes::Bytes = buf.into();
+        let mut buf = bytes.as_ref();
+        let position = WalPosition::read_from_buf(&mut buf);
+        assert_eq!(position, WalPosition::TEST);
+    }
+
     #[track_caller]
-    fn assert_bytes(e: &[u8], v: Result<(FragPosition, Bytes), WalReadError>) -> FragPosition {
+    fn assert_bytes(e: &[u8], v: Result<(WalPosition, Bytes), WalReadError>) -> WalPosition {
         let v = v.expect("Expected value, got nothing");
         assert_eq!(e, v.1.as_ref());
         v.0

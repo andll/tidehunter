@@ -1,6 +1,4 @@
-use crate::frag_manager::FragId;
-use crate::wal::FragPosition;
-use bytes::{Buf, BufMut};
+use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::Mutex;
 
@@ -8,8 +6,6 @@ pub struct LargeTable {
     data: Box<[Mutex<LargeTableEntry>]>,
 }
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
-pub struct Position(FragId, FragPosition);
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
 
@@ -20,14 +16,14 @@ pub struct LargeTableEntry {
 
 enum LargeTableEntryState {
     Empty,
-    Unloaded(Position),
-    Loaded(Position),
+    Unloaded(WalPosition),
+    Loaded(WalPosition),
     Dirty(Version),
 }
 
 #[derive(Clone)]
 struct IndexTable {
-    data: Vec<(Bytes, Position)>,
+    data: Vec<(Bytes, WalPosition)>,
 }
 
 pub struct LargeTableSnapshot {
@@ -36,7 +32,7 @@ pub struct LargeTableSnapshot {
 
 enum LargeTableSnapshotEntry {
     Empty,
-    Clean(Position),
+    Clean(WalPosition),
     Dirty(Version, IndexTable),
 }
 
@@ -52,7 +48,7 @@ impl LargeTable {
         Self { data }
     }
 
-    pub fn from_unloaded(snapshot: &[Position]) -> Self {
+    pub fn from_unloaded(snapshot: &[WalPosition]) -> Self {
         let data = snapshot
             .iter()
             .map(|p| Mutex::new(LargeTableEntry::new_unloaded(*p)))
@@ -60,12 +56,12 @@ impl LargeTable {
         Self { data }
     }
 
-    pub fn insert(&self, k: Bytes, v: Position) {
+    pub fn insert(&self, k: Bytes, v: WalPosition) {
         let entry = self.entry(&k);
         entry.lock().insert(k, v);
     }
 
-    pub fn get(&self, k: &[u8]) -> Option<Position> {
+    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         let entry = self.entry(k);
         entry.lock().get(k)
     }
@@ -90,7 +86,7 @@ impl LargeTable {
 }
 
 impl LargeTableEntry {
-    pub fn new_unloaded(position: Position) -> Self {
+    pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
             data: IndexTable { data: vec![] },
             state: LargeTableEntryState::Unloaded(position),
@@ -104,7 +100,7 @@ impl LargeTableEntry {
         }
     }
 
-    pub fn insert(&mut self, k: Bytes, v: Position) {
+    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         match &mut self.state {
             LargeTableEntryState::Empty => self.state = LargeTableEntryState::Dirty(Version::ZERO),
             LargeTableEntryState::Loaded(_) => {
@@ -129,20 +125,20 @@ impl LargeTableEntry {
         }
     }
 
-    pub fn get(&self, k: &[u8]) -> Option<Position> {
+    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         self.data.get(k)
     }
 }
 
 impl IndexTable {
-    pub fn insert(&mut self, k: Bytes, v: Position) {
+    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         match self.data.binary_search_by_key(&&k[..], |(k, _v)| &k[..]) {
             Ok(found) => self.data[found] = (k, v),
             Err(insert) => self.data.insert(insert, (k, v)),
         }
     }
 
-    pub fn get(&self, k: &[u8]) -> Option<Position> {
+    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         let pos = self.data.binary_search_by_key(&k, |(k, _v)| &k[..]).ok()?;
         Some(self.data.get(pos).unwrap().1)
     }
@@ -154,37 +150,5 @@ impl Version {
 
     pub fn increment(&mut self) {
         self.0 += 1;
-    }
-}
-
-impl Position {
-    pub const INVALID: Position = Position(FragId::INVALID, FragPosition::INVALID);
-    #[cfg(test)]
-    pub const TEST: Position = Position(FragId::TEST, FragPosition::TEST);
-    pub const LENGTH: usize = 8;
-
-    pub fn write_to_buf(&self, buf: &mut impl BufMut) {
-        self.0.write_to_buf(buf);
-        self.1.write_to_buf(buf);
-    }
-
-    pub fn read_from_buf(buf: &mut impl Buf) -> Self {
-        Self(FragId::read_from_buf(buf), FragPosition::read_from_buf(buf))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bytes::BytesMut;
-
-    #[test]
-    fn test_position() {
-        let mut buf = BytesMut::new();
-        Position::TEST.write_to_buf(&mut buf);
-        let bytes: bytes::Bytes = buf.into();
-        let mut buf = bytes.as_ref();
-        let position = Position::read_from_buf(&mut buf);
-        assert_eq!(position, Position::TEST);
     }
 }
