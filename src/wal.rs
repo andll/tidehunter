@@ -86,42 +86,31 @@ impl AtomicFragPosition {
 #[derive(Clone)]
 pub struct FragLayout {
     pub(crate) frag_size: u64,
-    pub(crate) map_size: u64,
 }
 
 impl FragLayout {
     fn assert_layout(&self) {
         assert!(self.frag_size <= u32::MAX as u64, "Frag size too large");
-        assert!(
-            self.map_size <= self.frag_size,
-            "Map size larger then frag size"
-        );
-        assert_eq!(
-            (self.frag_size / self.map_size) * self.map_size,
-            self.frag_size,
-            "Frag size should be divisible by map size"
-        );
         assert_eq!(
             self.frag_size,
             align(self.frag_size),
             "Frag size not aligned"
         );
-        assert_eq!(self.map_size, align(self.map_size), "Map size not aligned")
     }
 
     /// Allocate the next position.
-    /// Block should not cross the map boundary defined by the self.map_size
+    /// Block should not cross the map boundary defined by the self.frag_size
     /// End of the block should not exceed self.frag_size (returns None otherwise)
     fn next_position(&self, mut pos: u64, len_aligned: u64) -> Option<u64> {
         assert!(
-            len_aligned <= self.map_size,
-            "Entry({len_aligned}) is larger then map_size({})",
-            self.map_size
+            len_aligned <= self.frag_size,
+            "Entry({len_aligned}) is larger then frag_size({})",
+            self.frag_size
         );
         let map_start = self.locate(pos).0;
         let map_end = self.locate(pos + len_aligned - 1).0;
         if map_start != map_end {
-            pos = (map_start + 1) * self.map_size;
+            pos = (map_start + 1) * self.frag_size;
         }
         if pos + len_aligned > self.frag_size {
             None
@@ -133,13 +122,13 @@ impl FragLayout {
     /// Return number of a mapping and offset inside the mapping for given position
     #[inline]
     fn locate(&self, pos: u64) -> (u64, u64) {
-        (pos / self.map_size, pos % self.map_size)
+        (pos / self.frag_size, pos % self.frag_size)
     }
 
     /// Return range of a particular mapping
     fn map_range(&self, map: u64) -> Range<u64> {
-        let start = self.map_size * map;
-        let end = self.map_size * (map + 1);
+        let start = self.frag_size * map;
+        let end = self.frag_size * (map + 1);
         assert!(end <= self.frag_size);
         start..end
     }
@@ -190,7 +179,7 @@ impl Wal {
                     // todo - some mappings can be read-only
                     memmap2::MmapOptions::new()
                         .offset(range.start)
-                        .len(self.layout.map_size as usize)
+                        .len(self.layout.frag_size as usize)
                         .map_mut(&self.file)?
                 };
                 va.insert(mmap.into())
@@ -287,10 +276,7 @@ mod tests {
     fn test_wal() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let file = dir.path().join("wal");
-        let layout = FragLayout {
-            frag_size: 1024,
-            map_size: 1024,
-        };
+        let layout = FragLayout { frag_size: 1024 };
         let wal = Wal::open(&file, layout).unwrap();
         let writer = wal.writer();
         let pos = writer
@@ -309,10 +295,7 @@ mod tests {
         err.expect_err("Must fail");
         drop(writer);
         drop(wal);
-        let layout = FragLayout {
-            frag_size: 2048,
-            map_size: 2048,
-        };
+        let layout = FragLayout { frag_size: 2048 };
         let wal = Wal::open(&file, layout.clone()).unwrap();
         let mut wal_iterator = wal.wal_iterator();
         assert_bytes(&[1, 2, 3], wal_iterator.next());
@@ -344,10 +327,7 @@ mod tests {
 
     #[test]
     fn test_atomic_frag_position() {
-        let layout = FragLayout {
-            frag_size: 512,
-            map_size: 128,
-        };
+        let layout = FragLayout { frag_size: 512 };
         let position = AtomicFragPosition {
             layout,
             position: Arc::new(AtomicU64::new(0)),
@@ -355,10 +335,12 @@ mod tests {
         assert_eq!(Some(0), position.allocate_position(16));
         assert_eq!(Some(16), position.allocate_position(8));
         assert_eq!(Some(24), position.allocate_position(8));
-        assert_eq!(Some(128), position.allocate_position(100));
-        assert_eq!(Some(256), position.allocate_position(128));
-        assert_eq!(Some(256 + 128), position.allocate_position(120));
+        assert_eq!(Some(32), position.allocate_position(104));
+        assert_eq!(Some(136), position.allocate_position(128));
+        assert_eq!(Some(264), position.allocate_position(240));
         assert_eq!(None, position.allocate_position(9)); // just one over 8 bytes left
+        assert_eq!(Some(512 - 8), position.allocate_position(8));
+        assert_eq!(None, position.allocate_position(1)); // just one over 8 bytes left
     }
 
     #[test]
