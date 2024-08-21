@@ -32,7 +32,7 @@ impl ControlRegion {
         let snapshot = vec![WalPosition::INVALID; large_table_size].into_boxed_slice();
         Self {
             version: Version::ZERO,
-            replay_from: WalPosition::INVALID,
+            replay_from: WalPosition::ZERO,
             snapshot,
         }
     }

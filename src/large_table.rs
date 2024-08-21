@@ -51,7 +51,14 @@ impl LargeTable {
     pub fn from_unloaded(snapshot: &[WalPosition]) -> Self {
         let data = snapshot
             .iter()
-            .map(|p| Mutex::new(LargeTableEntry::new_unloaded(*p)))
+            .map(|p| {
+                let e = if p == &WalPosition::INVALID {
+                    LargeTableEntry::new_empty()
+                } else {
+                    LargeTableEntry::new_unloaded(*p)
+                };
+                Mutex::new(e)
+            })
             .collect();
         Self { data }
     }
@@ -126,6 +133,9 @@ impl LargeTableEntry {
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
+        if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
+            panic!("Can't get in unloaded state");
+        }
         self.data.get(k)
     }
 }

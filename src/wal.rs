@@ -14,10 +14,11 @@ use std::{io, mem};
 #[derive(Clone)]
 pub struct WalWriter {
     wal: Arc<Wal>,
-    map: Map,
+    map: Arc<Mutex<Map>>,
     position: AtomicWalPosition,
 }
 
+// todo periodically clear maps
 pub struct Wal {
     file: File,
     layout: WalLayout,
@@ -40,31 +41,31 @@ struct Map {
 pub struct WalPosition(u64);
 
 impl WalWriter {
-    pub fn write(&mut self, w: &PreparedWalWrite) -> Result<WalPosition, WalFullError> {
+    pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
         let (pos, prev_block_end) = self.position.allocate_position(len_aligned);
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(pos);
-        if self.map.id != map_id {
+        let mut map = self.map.lock();
+        // todo - decide whether map is covered by mutex or we want concurrent writes
+        if map.id != map_id {
             if pos != prev_block_end {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
-                assert_eq!(prev_map, self.map.id);
+                assert_eq!(prev_map, map.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = self
-                    .map
-                    .write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
+                let buf = map.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
             // todo put skip marker
-            self.wal.extend_to_map(map_id).unwrap(); // todo fix unwrap
-            self.map = self.wal.map(map_id).unwrap(); // todo fix unwrap
+            self.wal.extend_to_map(map_id)?;
+            *map = self.wal.map(map_id)?;
         } else {
             assert_eq!(pos, prev_block_end);
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
-        let buf = self.map.write_buf_at(offset as usize, len as usize);
+        let buf = map.write_buf_at(offset as usize, len as usize);
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
@@ -147,9 +148,6 @@ const fn align(l: u64) -> u64 {
     (l + ALIGN - 1) / ALIGN * ALIGN
 }
 
-#[derive(Debug)]
-pub struct WalFullError;
-
 impl Wal {
     pub fn open(p: &Path, layout: WalLayout) -> io::Result<Arc<Self>> {
         layout.assert_layout();
@@ -170,7 +168,7 @@ impl Wal {
         Arc::new(reader)
     }
 
-    pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalReadError> {
+    pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map)?;
         // todo avoid clone, introduce Bytes::slice_in_place
@@ -226,9 +224,9 @@ impl Wal {
 }
 
 impl WalIterator {
-    pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalReadError> {
+    pub fn next(&mut self) -> Result<(WalPosition, Bytes), WalError> {
         let frame = self.read_one();
-        let frame = if matches!(frame, Err(WalReadError::Crc(CrcReadError::SkipMarker))) {
+        let frame = if matches!(frame, Err(WalError::Crc(CrcReadError::SkipMarker))) {
             // handle skip marker - jump to next frag
             let next_map = self.map.id + 1;
             self.position = self.wal.layout.map_range(next_map).start;
@@ -241,7 +239,7 @@ impl WalIterator {
         Ok((position, frame))
     }
 
-    fn read_one(&mut self) -> Result<Bytes, WalReadError> {
+    fn read_one(&mut self) -> Result<Bytes, WalError> {
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(self.position);
         if self.map.id != map_id {
@@ -261,7 +259,7 @@ impl WalIterator {
         };
         WalWriter {
             wal: self.wal,
-            map: self.map,
+            map: Arc::new(Mutex::new(self.map)),
             position,
         }
     }
@@ -305,18 +303,18 @@ impl WalPosition {
 
 #[allow(dead_code)]
 #[derive(Debug)]
-pub enum WalReadError {
+pub enum WalError {
     Io(io::Error),
     Crc(CrcReadError),
 }
 
-impl From<CrcReadError> for WalReadError {
+impl From<CrcReadError> for WalError {
     fn from(value: CrcReadError) -> Self {
         Self::Crc(value)
     }
 }
 
-impl From<io::Error> for WalReadError {
+impl From<io::Error> for WalError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
     }
@@ -426,7 +424,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_bytes(e: &[u8], v: Result<(WalPosition, Bytes), WalReadError>) -> WalPosition {
+    fn assert_bytes(e: &[u8], v: Result<(WalPosition, Bytes), WalError>) -> WalPosition {
         let v = v.expect("Expected value, got nothing");
         assert_eq!(e, v.1.as_ref());
         v.0
