@@ -56,15 +56,19 @@ impl CrcFrame {
         }
         let mut len = [0u8; 4];
         len.copy_from_slice(&b[pos..pos + 4]);
-        let len = u32::from_be_bytes(len) as usize;
+        let len = u32::from_be_bytes(len);
+        let mut crc = [0u8; 4];
+        crc.copy_from_slice(&b[pos + 4..pos + 8]);
+        let crc = u32::from_be_bytes(crc);
+        if len == u32::MAX && crc == u32::MAX {
+            return Err(CrcReadError::SkipMarker);
+        }
+        let len = len as usize;
         // no overflow because len and pos are converted from u32
         if b.len() < pos + Self::CRC_LEN_HEADER_LENGTH + len {
             return Err(CrcReadError::OutOfBoundsBody(len));
         }
 
-        let mut crc = [0u8; 4];
-        crc.copy_from_slice(&b[pos + 4..pos + 8]);
-        let crc = u32::from_be_bytes(crc);
         let data =
             b.slice(pos + Self::CRC_LEN_HEADER_LENGTH..pos + Self::CRC_LEN_HEADER_LENGTH + len);
         let actual_crc = Self::crc(&data);
@@ -81,6 +85,12 @@ impl CrcFrame {
             crc32fast::hash(b)
         }
     }
+
+    fn skip_marker() -> Self {
+        Self {
+            bytes: vec![0xff; 8].into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +98,7 @@ pub enum CrcReadError {
     OutOfBoundsHeader,
     OutOfBoundsBody(usize),
     CrcMismatch,
+    SkipMarker,
 }
 
 impl CrcFrame {
