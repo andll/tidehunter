@@ -15,6 +15,7 @@ pub struct LargeTableEntry {
     state: LargeTableEntryState,
 }
 
+#[derive(PartialEq)]
 enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
@@ -27,11 +28,11 @@ pub struct IndexTable {
     data: Vec<(Bytes, WalPosition)>,
 }
 
-pub struct LargeTableSnapshot {
+pub(crate) struct LargeTableSnapshot {
     data: Box<[LargeTableSnapshotEntry]>,
 }
 
-enum LargeTableSnapshotEntry {
+pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
     Dirty(Version, IndexTable),
@@ -87,6 +88,7 @@ impl LargeTable {
         &self.data[pos % self.data.len()]
     }
 
+    /// Provides a weakly consistent snapshot of this large table.
     pub fn snapshot(&self) -> LargeTableSnapshot {
         let mut data = Vec::with_capacity(self.data.len());
         for entry in &self.data {
@@ -95,6 +97,14 @@ impl LargeTable {
         }
         let data = data.into_boxed_slice();
         LargeTableSnapshot { data }
+    }
+
+    /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken
+    pub fn maybe_update_entries(&self, updates: Vec<(usize, Version, WalPosition)>) {
+        for (index, version, position) in updates {
+            let mut entry = self.data[index].lock();
+            entry.maybe_set_to_loaded(version, position);
+        }
     }
 }
 
@@ -160,6 +170,12 @@ impl LargeTableEntry {
             }
         }
     }
+
+    pub fn maybe_set_to_loaded(&mut self, version: Version, position: WalPosition) {
+        if self.state == LargeTableEntryState::Dirty(version) {
+            self.state = LargeTableEntryState::Loaded(position)
+        }
+    }
 }
 
 impl IndexTable {
@@ -173,6 +189,12 @@ impl IndexTable {
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         let pos = self.data.binary_search_by_key(&k, |(k, _v)| &k[..]).ok()?;
         Some(self.data.get(pos).unwrap().1)
+    }
+}
+
+impl LargeTableSnapshot {
+    pub fn into_entries(self) -> Box<[LargeTableSnapshotEntry]> {
+        self.data
     }
 }
 

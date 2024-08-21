@@ -1,11 +1,14 @@
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, IntoBytesFixed};
-use crate::large_table::{IndexTable, LargeTable, Loader};
+use crate::large_table::{
+    IndexTable, LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader,
+};
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalWriter};
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
+use parking_lot::RwLock;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
@@ -34,7 +37,7 @@ impl Db {
         let cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(&cr)? };
         let control_region = if file_len != cr_len * 2 {
             // cr.set_len((cr_len * 2) as u64)?;
-            ControlRegion::new(config.large_table_size())
+            ControlRegion::new_empty(config.large_table_size())
         } else {
             Self::read_control_region(&cr_map, config)?
         };
@@ -111,6 +114,35 @@ impl Db {
                 }
             }
         }
+    }
+
+    fn rebuild_cr(&self) -> DbResult<()> {
+        let snapshot = self.large_table.snapshot();
+        let snapshot = self.write_snapshot(snapshot)?;
+
+        Ok(())
+    }
+
+    fn write_snapshot(&self, snapshot: LargeTableSnapshot) -> DbResult<Box<[WalPosition]>> {
+        let iter = Box::into_iter(snapshot.into_entries());
+        let mut index_updates = vec![];
+        let snapshot = iter
+            .enumerate()
+            .map(|(i, entry)| match entry {
+                LargeTableSnapshotEntry::Empty => Ok(WalPosition::INVALID),
+                LargeTableSnapshotEntry::Clean(pos) => Ok(pos),
+                LargeTableSnapshotEntry::Dirty(version, index) => {
+                    let index = bincode::serialize(&index)?;
+                    let index = index.into();
+                    let w = PreparedWalWrite::new(&WalEntry::Index(index));
+                    let position = self.wal_writer.write(&w)?;
+                    index_updates.push((i, version, position));
+                    Ok(position)
+                }
+            })
+            .collect::<DbResult<Box<[WalPosition]>>>()?;
+        self.large_table.maybe_update_entries(index_updates);
+        Ok(snapshot)
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
