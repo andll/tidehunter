@@ -10,7 +10,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub struct Db {
+    // todo - avoid read lock on reads?
     large_table: RwLock<LargeTable>,
     wal: Arc<Wal>,
     wal_writer: WalWriter,
@@ -35,9 +36,29 @@ impl Db {
             .write(true)
             .create(true)
             .open(path.join("cr"))?;
+        let (control_region_store, control_region) =
+            Self::read_or_create_control_region(&cr, config)?;
+        let large_table = LargeTable::from_unloaded(control_region.snapshot());
+        let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
+        let wal_iterator = wal.wal_iterator(control_region.last_position())?;
+        let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
+        let large_table = RwLock::new(large_table);
+        let control_region_store = Mutex::new(control_region_store);
+        Ok(Self {
+            large_table,
+            wal_writer,
+            wal,
+            control_region_store,
+        })
+    }
+
+    fn read_or_create_control_region(
+        cr: &File,
+        config: &Config,
+    ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
         let file_len = cr.metadata()?.len() as usize;
         let cr_len = config.cr_len();
-        let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(&cr)? };
+        let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(cr)? };
         let (last_written_left, control_region) = if file_len != cr_len * 2 {
             cr.set_len((cr_len * 2) as u64)?;
             let skip_marker = CrcFrame::skip_marker();
@@ -47,23 +68,12 @@ impl Db {
         } else {
             Self::read_control_region(&cr_map, config)?
         };
-        let large_table = LargeTable::from_unloaded(control_region.snapshot());
-        let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
-        let wal_iterator = wal.wal_iterator(control_region.last_position())?;
-        let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
-        let large_table = RwLock::new(large_table);
         let control_region_store = ControlRegionStore {
             cr_map,
             last_written_left,
             last_version: control_region.version(),
         };
-        let control_region_store = Mutex::new(control_region_store);
-        Ok(Self {
-            large_table,
-            wal_writer,
-            wal,
-            control_region_store,
-        })
+        Ok((control_region_store, control_region))
     }
 
     fn read_control_region(
