@@ -175,10 +175,7 @@ impl Wal {
         let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
-        Ok(CrcFrame::read_from_checked_with_len(
-            &map.data,
-            offset as usize,
-        )?)
+        Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
     }
 
     fn map(&self, id: u64, write: bool) -> io::Result<Map> {
@@ -255,7 +252,7 @@ impl WalIterator {
             frame?
         };
         let position = WalPosition(self.position);
-        self.position += align((frame.len() + CrcFrame::CRC_LEN_HEADER_LENGTH) as u64);
+        self.position += align((frame.len() + CrcFrame::CRC_HEADER_LENGTH) as u64);
         Ok((position, frame))
     }
 
@@ -266,10 +263,7 @@ impl WalIterator {
             self.wal.extend_to_map(map_id)?;
             self.map = self.wal.map(map_id, true)?;
         }
-        Ok(CrcFrame::read_from_checked_with_len(
-            &self.map.data,
-            offset as usize,
-        )?)
+        Ok(CrcFrame::read_from_bytes(&self.map.data, offset as usize)?)
     }
 
     pub fn into_writer(self) -> WalWriter {
@@ -305,7 +299,7 @@ pub struct PreparedWalWrite {
 
 impl PreparedWalWrite {
     pub fn new(t: &impl IntoBytesFixed) -> Self {
-        let frame = CrcFrame::from_bytes_fixed_with_len(t);
+        let frame = CrcFrame::new(t);
         Self { frame }
     }
 }
@@ -357,10 +351,10 @@ mod tests {
         let file = dir.path().join("wal");
         let layout = WalLayout { frag_size: 1024 };
         // todo - add second test case when there is no space for skip marker after large
-        let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_LEN_HEADER_LENGTH * 3 - 9];
+        let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
             let wal = Wal::open(&file, layout.clone()).unwrap();
-            let mut writer = wal.wal_iterator(WalPosition::ZERO).unwrap().into_writer();
+            let writer = wal.wal_iterator(WalPosition::ZERO).unwrap().into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
@@ -381,7 +375,7 @@ mod tests {
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            let mut writer = wal_iterator.into_writer();
+            let writer = wal_iterator.into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![91, 92, 93]))
                 .unwrap();

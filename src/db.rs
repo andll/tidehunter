@@ -1,24 +1,26 @@
 use crate::config::Config;
 use crate::control::ControlRegion;
-use crate::crc::{CrcFrame, IntoBytesFixed};
+use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::large_table::{
-    IndexTable, LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader,
+    IndexTable, LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
+use crate::metrics::Metrics;
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalWriter};
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub struct Db {
-    large_table: LargeTable,
+    large_table: RwLock<LargeTable>,
     wal: Arc<Wal>,
     wal_writer: WalWriter,
-    cr_map: MmapMut,
+    control_region_store: Mutex<ControlRegionStore>,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -26,65 +28,83 @@ pub type DbResult<T> = Result<T, DbError>;
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 
 impl Db {
-    pub fn open(path: &Path, config: &Config) -> DbResult<Self> {
+    pub fn open(path: &Path, config: &Config, metrics: Arc<Metrics>) -> DbResult<Self> {
         let cr = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path.join("cr"))?;
         let file_len = cr.metadata()?.len() as usize;
-        let cr_len = ControlRegion::len_from_large_table_size(config.large_table_size());
-        let cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(&cr)? };
-        let control_region = if file_len != cr_len * 2 {
-            // cr.set_len((cr_len * 2) as u64)?;
-            ControlRegion::new_empty(config.large_table_size())
+        let cr_len = config.cr_len();
+        let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(&cr)? };
+        let (last_written_left, control_region) = if file_len != cr_len * 2 {
+            cr.set_len((cr_len * 2) as u64)?;
+            let skip_marker = CrcFrame::skip_marker();
+            cr_map[0..skip_marker.len_with_header()].copy_from_slice(skip_marker.as_ref());
+            cr_map.flush()?;
+            (false, ControlRegion::new_empty(config.large_table_size()))
         } else {
             Self::read_control_region(&cr_map, config)?
         };
         let large_table = LargeTable::from_unloaded(control_region.snapshot());
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         let wal_iterator = wal.wal_iterator(control_region.replay_from())?;
-        let wal_writer = Self::replay_wal(&large_table, wal_iterator)?;
-        Ok(Self {
+        let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
+        let large_table = RwLock::new(large_table);
+        let control_region_store = ControlRegionStore {
             cr_map,
+            last_written_left,
+            last_version: control_region.version(),
+        };
+        let control_region_store = Mutex::new(control_region_store);
+        Ok(Self {
             large_table,
             wal_writer,
             wal,
+            control_region_store,
         })
     }
 
-    fn read_control_region(cr_map: &MmapMut, config: &Config) -> Result<ControlRegion, DbError> {
-        let cr_len = ControlRegion::len_from_large_table_size(config.large_table_size());
+    fn read_control_region(
+        cr_map: &MmapMut,
+        config: &Config,
+    ) -> Result<(bool, ControlRegion), DbError> {
+        let cr_len = config.cr_len();
         assert_eq!(cr_map.len(), cr_len * 2);
-        let cr1 = CrcFrame::read_from_checked_no_len(&cr_map[..cr_len]);
-        let cr2 = CrcFrame::read_from_checked_no_len(&cr_map[cr_len..]);
-        let cr = match (cr1, cr2) {
-            (Ok(cr1), Err(_)) => cr1,
-            (Err(_), Ok(cr2)) => cr2,
+        let cr1 = CrcFrame::read_from_slice(&cr_map, 0);
+        let cr2 = CrcFrame::read_from_slice(&cr_map, cr_len);
+        let (last_written_left, cr) = match (cr1, cr2) {
+            (Ok(cr1), Err(_)) => (true, cr1),
+            (Err(_), Ok(cr2)) => (false, cr2),
             (Ok(cr1), Ok(cr2)) => {
                 let version1 = ControlRegion::version_from_bytes(cr1);
                 let version2 = ControlRegion::version_from_bytes(cr2);
                 if version1 > version2 {
-                    cr1
+                    (true, cr1)
                 } else {
-                    cr2
+                    (false, cr2)
                 }
+            }
+            // Cr region is valid but empty
+            (Err(CrcReadError::SkipMarker), Err(_)) => {
+                return Ok((false, ControlRegion::new_empty(config.large_table_size())))
             }
             (Err(_), Err(_)) => return Err(DbError::CrCorrupted),
         };
-        Ok(ControlRegion::from_bytes(&cr, config.large_table_size()))
+        let control_region = ControlRegion::from_slice(&cr, config.large_table_size());
+        Ok((last_written_left, control_region))
     }
 
     pub fn insert(&self, k: Bytes, v: Bytes) -> DbResult<()> {
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
-        self.large_table.insert(k, position, &*self.wal)?;
+        self.large_table.read().insert(k, position, &*self.wal)?;
         Ok(())
     }
 
     pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let Some(position) = self.large_table.get(k, &*self.wal)? else {
+        let Some(position) = self.large_table.read().get(k, &*self.wal)? else {
             return Ok(None);
         };
         let entry = Self::read_entry(&self.wal, position)?;
@@ -97,7 +117,11 @@ impl Db {
         Ok(Some(value))
     }
 
-    fn replay_wal(large_table: &LargeTable, mut wal_iterator: WalIterator) -> DbResult<WalWriter> {
+    fn replay_wal(
+        large_table: &LargeTable,
+        mut wal_iterator: WalIterator,
+        metrics: &Metrics,
+    ) -> DbResult<WalWriter> {
         loop {
             let entry = wal_iterator.next();
             if matches!(entry, Err(WalError::Crc(_))) {
@@ -107,6 +131,7 @@ impl Db {
             let entry = WalEntry::from_bytes(entry);
             match entry {
                 WalEntry::Record(k, _v) => {
+                    metrics.replayed_wal_records.fetch_add(1, Ordering::Relaxed);
                     large_table.insert(k, position, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_bytes) => {
@@ -116,11 +141,16 @@ impl Db {
         }
     }
 
-    fn rebuild_cr(&self) -> DbResult<()> {
-        let snapshot = self.large_table.snapshot();
+    fn rebuild_control_region(&self) -> DbResult<()> {
+        let mut crs = self.control_region_store.lock();
+        // drop large_table lock asap
+        let snapshot = self.large_table.write().snapshot();
+        let last_added_position = snapshot.last_added_position();
+        let last_added_position = last_added_position.unwrap_or(WalPosition::INVALID);
         let snapshot = self.write_snapshot(snapshot)?;
-
-        Ok(())
+        // todo change semantics of replay_from
+        // todo fsync wal first
+        crs.store(snapshot, last_added_position)
     }
 
     fn write_snapshot(&self, snapshot: LargeTableSnapshot) -> DbResult<Box<[WalPosition]>> {
@@ -141,13 +171,47 @@ impl Db {
                 }
             })
             .collect::<DbResult<Box<[WalPosition]>>>()?;
-        self.large_table.maybe_update_entries(index_updates);
+        self.large_table.read().maybe_update_entries(index_updates);
         Ok(snapshot)
     }
 
     fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
         let entry = wal.read(position)?;
         Ok(WalEntry::from_bytes(entry))
+    }
+}
+
+struct ControlRegionStore {
+    cr_map: MmapMut,
+    last_version: Version,
+    last_written_left: bool,
+}
+
+impl ControlRegionStore {
+    pub fn store(
+        &mut self,
+        snapshot: Box<[WalPosition]>,
+        last_position: WalPosition,
+    ) -> DbResult<()> {
+        let control_region = ControlRegion::new(snapshot, self.increment_version(), last_position);
+        let frame = CrcFrame::new(&control_region);
+        assert_eq!(frame.len_with_header() * 2, self.cr_map.len());
+        let write_to = if self.last_written_left {
+            // write right
+            &mut self.cr_map[frame.len_with_header()..]
+        } else {
+            // write left
+            &mut self.cr_map[..frame.len_with_header()]
+        };
+        write_to.copy_from_slice(frame.as_ref());
+        self.cr_map.flush()?;
+        self.last_written_left = !self.last_written_left;
+        Ok(())
+    }
+
+    fn increment_version(&mut self) -> Version {
+        self.last_version.increment();
+        self.last_version
     }
 }
 
@@ -250,7 +314,7 @@ mod test {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Config::small();
         {
-            let db = Db::open(dir.path(), &config).unwrap();
+            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
             db.insert(vec![1, 2, 3, 4].into(), vec![5, 6].into())
                 .unwrap();
             db.insert(vec![3, 4, 5, 6].into(), vec![7].into()).unwrap();
@@ -258,7 +322,15 @@ mod test {
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), &config).unwrap();
+            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            db.rebuild_control_region().unwrap();
+        }
+        {
+            let metrics = Metrics::new();
+            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }

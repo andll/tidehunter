@@ -1,3 +1,5 @@
+use crate::control::ControlRegion;
+use crate::crc::CrcFrame;
 use crate::wal::WalLayout;
 
 pub struct Config {
@@ -24,6 +26,11 @@ impl Config {
 
     pub fn large_table_size(&self) -> usize {
         self.large_table_size
+    }
+
+    pub fn cr_len(&self) -> usize {
+        ControlRegion::len_bytes_from_large_table_size(self.large_table_size())
+            + CrcFrame::CRC_HEADER_LENGTH
     }
 
     pub fn frag_size(&self) -> u64 {

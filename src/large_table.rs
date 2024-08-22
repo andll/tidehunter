@@ -12,6 +12,7 @@ pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
     data: IndexTable,
+    last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
 }
 
@@ -30,6 +31,7 @@ pub struct IndexTable {
 
 pub(crate) struct LargeTableSnapshot {
     data: Box<[LargeTableSnapshotEntry]>,
+    last_added_position: Option<WalPosition>,
 }
 
 pub(crate) enum LargeTableSnapshotEntry {
@@ -88,15 +90,25 @@ impl LargeTable {
         &self.data[pos % self.data.len()]
     }
 
-    /// Provides a weakly consistent snapshot of this large table.
-    pub fn snapshot(&self) -> LargeTableSnapshot {
+    /// Provides a snapshot of this large table.
+    /// Takes &mut reference to ensure consistency of last_added_position.
+    pub fn snapshot(&mut self) -> LargeTableSnapshot {
         let mut data = Vec::with_capacity(self.data.len());
+        let mut last_added_position = None;
         for entry in &self.data {
-            let entry = entry.lock().snapshot();
-            data.push(entry);
+            let entry = entry.lock();
+            let snapshot = entry.snapshot();
+            LargeTableSnapshot::update_last_added_position(
+                &mut last_added_position,
+                entry.last_added_position,
+            );
+            data.push(snapshot);
         }
         let data = data.into_boxed_slice();
-        LargeTableSnapshot { data }
+        LargeTableSnapshot {
+            data,
+            last_added_position,
+        }
     }
 
     /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken
@@ -118,6 +130,7 @@ impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
             data: IndexTable { data: vec![] },
+            last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
         }
     }
@@ -125,6 +138,7 @@ impl LargeTableEntry {
     pub fn new_empty() -> Self {
         Self {
             data: IndexTable { data: vec![] },
+            last_added_position: None,
             state: LargeTableEntryState::Empty,
         }
     }
@@ -141,6 +155,7 @@ impl LargeTableEntry {
             }
         }
         self.data.insert(k, v);
+        self.last_added_position = Some(v);
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -195,6 +210,23 @@ impl IndexTable {
 impl LargeTableSnapshot {
     pub fn into_entries(self) -> Box<[LargeTableSnapshotEntry]> {
         self.data
+    }
+
+    pub fn last_added_position(&self) -> Option<WalPosition> {
+        self.last_added_position
+    }
+
+    fn update_last_added_position(u: &mut Option<WalPosition>, v: Option<WalPosition>) {
+        let Some(v) = v else {
+            return;
+        };
+        if let Some(u) = u {
+            if v > *u {
+                *u = v;
+            }
+        } else {
+            *u = Some(v);
+        }
     }
 }
 

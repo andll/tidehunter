@@ -49,10 +49,10 @@ impl ControlRegion {
         Version(bytes.get_u64())
     }
 
-    pub fn from_bytes(mut bytes: &[u8], large_table_size: usize) -> Self {
+    pub fn from_slice(mut bytes: &[u8], large_table_size: usize) -> Self {
         assert_eq!(
             bytes.len(),
-            Self::len_from_large_table_size(large_table_size)
+            Self::len_bytes_from_large_table_size(large_table_size)
         );
         let version = bytes.get_u64();
         let replay_from = WalPosition::read_from_buf(&mut bytes);
@@ -72,11 +72,19 @@ impl ControlRegion {
         &self.snapshot
     }
 
+    pub fn version(&self) -> Version {
+        self.version
+    }
+
     pub fn replay_from(&self) -> WalPosition {
         self.replay_from
     }
 
-    pub fn len_from_large_table_size(large_table_size: usize) -> usize {
+    pub fn len_bytes(&self) -> usize {
+        IntoBytesFixed::len(self)
+    }
+
+    pub fn len_bytes_from_large_table_size(large_table_size: usize) -> usize {
         Version::LENGTH + WalPosition::LENGTH + large_table_size * WalPosition::LENGTH
     }
 }
