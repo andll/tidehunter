@@ -1,3 +1,4 @@
+use std::time::{Duration, Instant};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::Mutex;
@@ -14,6 +15,7 @@ pub struct LargeTableEntry {
     data: IndexTable,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
+    last_accessed: Instant,
 }
 
 #[derive(PartialEq)]
@@ -118,6 +120,12 @@ impl LargeTable {
             entry.maybe_set_to_loaded(version, position);
         }
     }
+
+    pub fn unload_clean(&self, max_last_accessed: Instant) {
+        for entry in &self.data {
+            entry.lock().unload_clean(max_last_accessed);
+        }
+    }
 }
 
 pub trait Loader {
@@ -132,6 +140,7 @@ impl LargeTableEntry {
             data: IndexTable { data: vec![] },
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
+            last_accessed: Instant::now(),
         }
     }
 
@@ -140,6 +149,7 @@ impl LargeTableEntry {
             data: IndexTable { data: vec![] },
             last_added_position: None,
             state: LargeTableEntryState::Empty,
+            last_accessed: Instant::now(),
         }
     }
 
@@ -156,12 +166,14 @@ impl LargeTableEntry {
         }
         self.data.insert(k, v);
         self.last_added_position = Some(v);
+        self.last_accessed = Instant::now();
     }
 
-    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
+    pub fn get(&mut self, k: &[u8]) -> Option<WalPosition> {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't get in unloaded state");
         }
+        self.last_accessed = Instant::now();
         self.data.get(k)
     }
 
@@ -189,6 +201,16 @@ impl LargeTableEntry {
     pub fn maybe_set_to_loaded(&mut self, version: Version, position: WalPosition) {
         if self.state == LargeTableEntryState::Dirty(version) {
             self.state = LargeTableEntryState::Loaded(position)
+        }
+    }
+
+    pub fn unload_clean(&mut self, max_last_accessed: Instant) {
+        if let LargeTableEntryState::Loaded(position) = self.state {
+            if self.last_accessed > max_last_accessed {
+                return;
+            }
+            self.data.data.clear();
+            self.state = LargeTableEntryState::Unloaded(position);
         }
     }
 }

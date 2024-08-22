@@ -15,6 +15,7 @@ use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct Db {
     large_table: RwLock<LargeTable>,
@@ -117,6 +118,10 @@ impl Db {
             panic!("Unexpected wal entry where expected record");
         };
         Ok(Some(value))
+    }
+
+    fn unload_clean(&self, max_last_accessed: Instant) {
+        self.large_table.read().unload_clean(max_last_accessed);
     }
 
     fn replay_wal(
