@@ -1,8 +1,8 @@
-use std::time::{Duration, Instant};
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 pub struct LargeTable {
     data: Box<[Mutex<LargeTableEntry>]>,

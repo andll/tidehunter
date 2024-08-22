@@ -1,11 +1,12 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::primitives::ShardedMutex;
 use bytes::{Buf, BufMut};
 use memmap2::{Mmap, MmapMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::path::Path;
@@ -24,7 +25,7 @@ pub struct WalWriter {
 pub struct Wal {
     file: File,
     layout: WalLayout,
-    maps: Mutex<BTreeMap<u64, Bytes>>,
+    maps: MapMutex,
 }
 
 pub struct WalIterator {
@@ -39,6 +40,8 @@ struct Map {
     data: Bytes,
     writeable: bool,
 }
+
+type MapMutex = ShardedMutex<HashMap<u64, Bytes>, 16>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
@@ -179,7 +182,7 @@ impl Wal {
     }
 
     fn map(&self, id: u64, write: bool) -> io::Result<Map> {
-        let mut maps = self.maps.lock();
+        let mut maps = self.maps.lock(id as usize);
         let b = match maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
@@ -241,13 +244,17 @@ impl Wal {
     // Attempts cleaning internal mem maps, returning number of retained maps
     // Map can be freed when all buffers linked to this portion of a file are dropped
     pub fn cleanup(&self) -> usize {
-        let mut maps = self.maps.lock();
-        maps.retain(|_k, v| {
-            v.downcast_mut::<Mmap>().is_none() &&
-            // todo maybe don't put writeable maps into self.maps?
-            v.downcast_mut::<MmapMut>().is_none()
-        });
-        maps.len()
+        let mut len = 0;
+        for lock in self.maps.as_ref() {
+            let mut maps = lock.lock();
+            maps.retain(|_k, v| {
+                v.downcast_mut::<Mmap>().is_none() &&
+                    // todo maybe don't put writeable maps into self.maps?
+                    v.downcast_mut::<MmapMut>().is_none()
+            });
+            len += maps.len();
+        }
+        len
     }
 }
 
