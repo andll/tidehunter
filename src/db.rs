@@ -1,3 +1,4 @@
+use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
@@ -130,6 +131,16 @@ impl Db {
         Ok(Some(value))
     }
 
+    pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
+        // todo implement atomic durability
+        let lock = self.large_table.read();
+        for (k, w) in batch.into_writes() {
+            let position = self.wal_writer.write(&w)?;
+            lock.insert(k, position, &*self.wal)?;
+        }
+        Ok(())
+    }
+
     fn unload_clean(&self, max_last_accessed: Instant) {
         self.large_table.read().unload_clean(max_last_accessed);
     }
@@ -245,7 +256,7 @@ impl Loader for &Wal {
     }
 }
 
-enum WalEntry {
+pub(crate) enum WalEntry {
     Record(Bytes, Bytes),
     Index(Bytes),
 }
@@ -365,5 +376,18 @@ mod test {
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![9].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
+    }
+
+    #[test]
+    fn batch_test() {
+        let dir = tempdir::TempDir::new("batch-test").unwrap();
+        let config = Config::small();
+        let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+        let mut batch = WriteBatch::new();
+        batch.write(vec![5, 6, 7, 8], vec![15]);
+        batch.write(vec![6, 7, 8, 9], vec![17]);
+        db.write_batch(batch).unwrap();
+        assert_eq!(Some(vec![15].into()), db.get(&[5, 6, 7, 8]).unwrap());
+        assert_eq!(Some(vec![17].into()), db.get(&[6, 7, 8, 9]).unwrap());
     }
 }
