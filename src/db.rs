@@ -117,6 +117,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn remove(&self, k: impl Into<Bytes>) -> DbResult<bool> {
+        let k = k.into();
+        assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
+        let w = PreparedWalWrite::new(&WalEntry::Remove(k.clone()));
+        let position = self.wal_writer.write(&w)?;
+        Ok(self.large_table.read().remove(&k, position, &*self.wal)?)
+    }
+
     pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
         let Some(position) = self.large_table.read().get(k, &*self.wal)? else {
             return Ok(None);
@@ -164,6 +172,10 @@ impl Db {
                 }
                 WalEntry::Index(_bytes) => {
                     // todo - handle this by updating large table to Loaded()
+                }
+                WalEntry::Remove(k) => {
+                    metrics.replayed_wal_records.fetch_add(1, Ordering::Relaxed);
+                    large_table.remove(&k, position, wal_iterator.wal())?;
                 }
             }
         }
@@ -259,6 +271,7 @@ impl Loader for &Wal {
 pub(crate) enum WalEntry {
     Record(Bytes, Bytes),
     Index(Bytes),
+    Remove(Bytes),
 }
 
 #[derive(Debug)]
@@ -272,6 +285,7 @@ pub enum DbError {
 impl WalEntry {
     const WAL_ENTRY_RECORD: u16 = 1;
     const WAL_ENTRY_INDEX: u16 = 2;
+    const WAL_ENTRY_REMOVE: u16 = 3;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
         let mut b = &bytes[..];
@@ -284,6 +298,7 @@ impl WalEntry {
                 WalEntry::Record(k, v)
             }
             WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(2..)),
+            WalEntry::WAL_ENTRY_REMOVE => WalEntry::Remove(bytes.slice(2..)),
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -294,6 +309,7 @@ impl IntoBytesFixed for WalEntry {
         match self {
             WalEntry::Record(k, v) => 4 + k.len() + v.len(),
             WalEntry::Index(index) => 2 + index.len(),
+            WalEntry::Remove(k) => 2 + k.len(),
         }
     }
 
@@ -309,6 +325,10 @@ impl IntoBytesFixed for WalEntry {
             WalEntry::Index(bytes) => {
                 buf.put_u16(Self::WAL_ENTRY_INDEX);
                 buf.put_slice(&bytes);
+            }
+            WalEntry::Remove(k) => {
+                buf.put_u16(Self::WAL_ENTRY_REMOVE);
+                buf.put_slice(&k)
             }
         }
     }
@@ -379,8 +399,8 @@ mod test {
     }
 
     #[test]
-    fn batch_test() {
-        let dir = tempdir::TempDir::new("batch-test").unwrap();
+    fn test_batch() {
+        let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Config::small();
         let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
@@ -389,5 +409,38 @@ mod test {
         db.write_batch(batch).unwrap();
         assert_eq!(Some(vec![15].into()), db.get(&[5, 6, 7, 8]).unwrap());
         assert_eq!(Some(vec![17].into()), db.get(&[6, 7, 8, 9]).unwrap());
+    }
+
+    #[test]
+    fn test_remove() {
+        let dir = tempdir::TempDir::new("test-remove").unwrap();
+        let config = Config::small();
+        {
+            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            assert!(db.remove(vec![1, 2, 3, 4]).unwrap());
+            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
+            assert!(!db.remove(vec![1, 2, 3, 4]).unwrap());
+            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
+        }
+        {
+            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
+            db.insert(vec![1, 2, 3, 4], vec![9, 10]).unwrap();
+            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            assert_eq!(Some(vec![9, 10].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            db.rebuild_control_region().unwrap();
+            assert!(db.remove(vec![1, 2, 3, 4]).unwrap());
+        }
+        {
+            let metrics = Metrics::new();
+            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
+            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+        }
     }
 }

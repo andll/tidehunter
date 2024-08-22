@@ -77,6 +77,13 @@ impl LargeTable {
         Ok(())
     }
 
+    pub fn remove<L: Loader>(&self, k: &[u8], v: WalPosition, loader: L) -> Result<bool, L::Error> {
+        let entry = self.entry(k);
+        let mut entry = entry.lock();
+        entry.maybe_load(loader)?;
+        Ok(entry.remove(k, v))
+    }
+
     pub fn get<L: Loader>(&self, k: &[u8], loader: L) -> Result<Option<WalPosition>, L::Error> {
         let entry = self.entry(k);
         let mut entry = entry.lock();
@@ -154,19 +161,16 @@ impl LargeTableEntry {
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        match &mut self.state {
-            LargeTableEntryState::Empty => self.state = LargeTableEntryState::Dirty(Version::ZERO),
-            LargeTableEntryState::Loaded(_) => {
-                self.state = LargeTableEntryState::Dirty(Version::ZERO)
-            }
-            LargeTableEntryState::Dirty(version) => version.increment(),
-            LargeTableEntryState::Unloaded(_) => {
-                panic!("Insert is not allowed on the Unloaded entry")
-            }
-        }
+        self.prepare_for_mutation();
         self.data.insert(k, v);
         self.last_added_position = Some(v);
-        self.last_accessed = Instant::now();
+    }
+
+    pub fn remove(&mut self, k: &[u8], v: WalPosition) -> bool {
+        self.prepare_for_mutation();
+        let result = self.data.remove(k);
+        self.last_added_position = Some(v);
+        result
     }
 
     pub fn get(&mut self, k: &[u8]) -> Option<WalPosition> {
@@ -213,6 +217,20 @@ impl LargeTableEntry {
             self.state = LargeTableEntryState::Unloaded(position);
         }
     }
+
+    fn prepare_for_mutation(&mut self) {
+        match &mut self.state {
+            LargeTableEntryState::Empty => self.state = LargeTableEntryState::Dirty(Version::ZERO),
+            LargeTableEntryState::Loaded(_) => {
+                self.state = LargeTableEntryState::Dirty(Version::ZERO)
+            }
+            LargeTableEntryState::Dirty(version) => version.increment(),
+            LargeTableEntryState::Unloaded(_) => {
+                panic!("Mutation is not allowed on the Unloaded entry")
+            }
+        }
+        self.last_accessed = Instant::now();
+    }
 }
 
 impl IndexTable {
@@ -220,6 +238,16 @@ impl IndexTable {
         match self.data.binary_search_by_key(&&k[..], |(k, _v)| &k[..]) {
             Ok(found) => self.data[found] = (k, v),
             Err(insert) => self.data.insert(insert, (k, v)),
+        }
+    }
+
+    pub fn remove(&mut self, k: &[u8]) -> bool {
+        match self.data.binary_search_by_key(&k, |(k, _v)| &k[..]) {
+            Ok(found) => {
+                self.data.remove(found);
+                true
+            }
+            Err(_) => false,
         }
     }
 
