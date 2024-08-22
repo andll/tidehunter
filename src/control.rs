@@ -25,10 +25,6 @@ impl IntoBytesFixed for ControlRegion {
 }
 
 impl ControlRegion {
-    const VERSION_OFFSET: usize = 0;
-    const REPLAY_FROM_OFFSET: usize = Self::VERSION_OFFSET + Version::LENGTH;
-    const SNAPSHOT_OFFSET: usize = Self::REPLAY_FROM_OFFSET + WalPosition::LENGTH;
-
     pub fn new_empty(large_table_size: usize) -> Self {
         let snapshot = vec![WalPosition::INVALID; large_table_size].into_boxed_slice();
         Self {
