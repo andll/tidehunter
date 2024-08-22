@@ -216,15 +216,26 @@ impl Wal {
         Ok(())
     }
 
-    pub fn wal_iterator(self: &Arc<Self>, position: WalPosition) -> io::Result<WalIterator> {
-        let (map_id, _) = self.layout.locate(position.0);
+    /// Iterate wal from the position after given position
+    /// If WalPosition::INVALID is specified, iterate from start
+    pub fn wal_iterator(self: &Arc<Self>, position: WalPosition) -> Result<WalIterator, WalError> {
+        let (skip_one, position) = if position == WalPosition::INVALID {
+            (false, 0)
+        } else {
+            (true, position.0)
+        };
+        let (map_id, _) = self.layout.locate(position);
         self.extend_to_map(map_id)?;
         let map = self.map(map_id, true)?;
-        Ok(WalIterator {
+        let mut iterator = WalIterator {
             wal: self.clone(),
-            position: position.0,
+            position,
             map,
-        })
+        };
+        if skip_one {
+            iterator.next()?;
+        }
+        Ok(iterator)
     }
 
     // Attempts cleaning internal mem maps, returning number of retained maps
@@ -354,7 +365,10 @@ mod tests {
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
             let wal = Wal::open(&file, layout.clone()).unwrap();
-            let writer = wal.wal_iterator(WalPosition::ZERO).unwrap().into_writer();
+            let writer = wal
+                .wal_iterator(WalPosition::INVALID)
+                .unwrap()
+                .into_writer();
             let pos = writer
                 .write(&PreparedWalWrite::new(&vec![1, 2, 3]))
                 .unwrap();
@@ -370,7 +384,7 @@ mod tests {
         }
         {
             let wal = Wal::open(&file, layout.clone()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::ZERO).unwrap();
+            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
             assert_bytes(&large, wal_iterator.next());
@@ -385,7 +399,7 @@ mod tests {
         }
         {
             let wal = Wal::open(&file, layout.clone()).unwrap();
-            let mut wal_iterator = wal.wal_iterator(WalPosition::ZERO).unwrap();
+            let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
             let p3 = assert_bytes(&large, wal_iterator.next());

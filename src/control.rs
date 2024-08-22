@@ -5,7 +5,8 @@ use bytes::{Buf, BufMut, BytesMut};
 
 pub struct ControlRegion {
     version: Version,
-    replay_from: WalPosition,
+    /// WalPosition::INVALID when wal is empty
+    last_position: WalPosition,
     snapshot: Box<[WalPosition]>,
 }
 
@@ -16,7 +17,7 @@ impl IntoBytesFixed for ControlRegion {
 
     fn write_into_bytes(&self, buf: &mut BytesMut) {
         buf.put_u64(self.version.0);
-        self.replay_from.write_to_buf(buf);
+        self.last_position.write_to_buf(buf);
         for i in 0..self.snapshot.len() {
             self.snapshot[i].write_to_buf(buf);
         }
@@ -32,16 +33,16 @@ impl ControlRegion {
         let snapshot = vec![WalPosition::INVALID; large_table_size].into_boxed_slice();
         Self {
             version: Version::ZERO,
-            replay_from: WalPosition::ZERO,
+            last_position: WalPosition::INVALID,
             snapshot,
         }
     }
 
-    pub fn new(snapshot: Box<[WalPosition]>, version: Version, replay_from: WalPosition) -> Self {
+    pub fn new(snapshot: Box<[WalPosition]>, version: Version, last_position: WalPosition) -> Self {
         Self {
             snapshot,
             version,
-            replay_from,
+            last_position,
         }
     }
 
@@ -63,7 +64,7 @@ impl ControlRegion {
         let snapshot = snapshot.into_boxed_slice();
         Self {
             version: Version(version),
-            replay_from,
+            last_position: replay_from,
             snapshot,
         }
     }
@@ -76,8 +77,8 @@ impl ControlRegion {
         self.version
     }
 
-    pub fn replay_from(&self) -> WalPosition {
-        self.replay_from
+    pub fn last_position(&self) -> WalPosition {
+        self.last_position
     }
 
     pub fn len_bytes(&self) -> usize {

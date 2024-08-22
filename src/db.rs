@@ -48,7 +48,7 @@ impl Db {
         };
         let large_table = LargeTable::from_unloaded(control_region.snapshot());
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
-        let wal_iterator = wal.wal_iterator(control_region.replay_from())?;
+        let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
         let large_table = RwLock::new(large_table);
         let control_region_store = ControlRegionStore {
@@ -95,7 +95,9 @@ impl Db {
         Ok((last_written_left, control_region))
     }
 
-    pub fn insert(&self, k: Bytes, v: Bytes) -> DbResult<()> {
+    pub fn insert(&self, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
+        let k = k.into();
+        let v = v.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
@@ -148,7 +150,6 @@ impl Db {
         let last_added_position = snapshot.last_added_position();
         let last_added_position = last_added_position.unwrap_or(WalPosition::INVALID);
         let snapshot = self.write_snapshot(snapshot)?;
-        // todo change semantics of replay_from
         // todo fsync wal first
         crs.store(snapshot, last_added_position)
     }
@@ -315,9 +316,8 @@ mod test {
         let config = Config::small();
         {
             let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
-            db.insert(vec![1, 2, 3, 4].into(), vec![5, 6].into())
-                .unwrap();
-            db.insert(vec![3, 4, 5, 6].into(), vec![7].into()).unwrap();
+            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
@@ -330,9 +330,25 @@ mod test {
         {
             let metrics = Metrics::new();
             let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
-            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
+            // nothing replayed from wal since we just rebuilt the control region
+            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 0);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            db.insert(vec![3, 4, 5, 6], vec![8]).unwrap();
+            assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
+        }
+        {
+            let metrics = Metrics::new();
+            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
+            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
+        }
+        {
+            let db = Db::open(dir.path(), &config, Metrics::new().clone()).unwrap();
+            db.insert(vec![3, 4, 5, 6], vec![9]).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![9].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
     }
 }
