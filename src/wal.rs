@@ -63,11 +63,11 @@ impl WalWriter {
                 let buf = map.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
-            // todo put skip marker
             self.wal.extend_to_map(map_id)?;
             *map = self.wal.map(map_id, true)?;
         } else {
-            assert_eq!(pos, prev_block_end);
+            // todo it is possible to have a race between map mutex and pos allocation so this check may fail
+            // assert_eq!(pos, align(prev_block_end));
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes

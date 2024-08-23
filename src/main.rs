@@ -1,21 +1,24 @@
-use parking_lot::Mutex;
-use std::time::Instant;
-
-mod batch;
-mod config;
+pub mod batch;
+pub mod config;
 mod control;
 mod crc;
-mod db;
+pub mod db;
 mod large_table;
-mod metrics;
+pub mod metrics;
 mod primitives;
+#[cfg(feature = "stress")]
+mod stress;
 mod wal;
 
 fn main() {
-    mutex_speed_test();
+    #[cfg(feature = "stress")]
+    stress::main();
 }
 
+#[allow(dead_code)]
 fn mutex_speed_test() {
+    use parking_lot::Mutex;
+    use std::time::Instant;
     const C: usize = 1_000_000;
     let mut v = Vec::with_capacity(C);
     for i in 0..C {
