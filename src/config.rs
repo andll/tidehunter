@@ -23,7 +23,7 @@ impl Config {
         Self {
             frag_size: 1024 * 1024,
             large_table_size: 256,
-            max_maps: 4,
+            max_maps: 16,
         }
     }
 
