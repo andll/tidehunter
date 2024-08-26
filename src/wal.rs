@@ -41,7 +41,7 @@ struct Map {
     writeable: bool,
 }
 
-type MapMutex = ShardedMutex<HashMap<u64, Bytes>, 16>;
+type MapMutex = ShardedMutex<HashMap<u64, Map>, 16>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
@@ -181,32 +181,39 @@ impl Wal {
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
     }
 
-    fn map(&self, id: u64, write: bool) -> io::Result<Map> {
+    fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
         let mut maps = self.maps.lock(id as usize);
-        let b = match maps.entry(id) {
+        let map = match maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
-                let mmap = unsafe {
+                let data = unsafe {
                     let mut options = memmap2::MmapOptions::new();
                     options
                         .offset(range.start)
                         .len(self.layout.frag_size as usize);
-                    if write {
+                    if writeable {
                         options.populate().map_mut(&self.file)?.into()
                     } else {
                         options.map(&self.file)?.into()
                     }
                 };
-                va.insert(mmap)
+                let map = Map {
+                    id,
+                    writeable,
+                    data,
+                };
+                va.insert(map)
             }
-            Entry::Occupied(oc) => oc.into_mut(),
+            Entry::Occupied(oc) => {
+                let map = oc.into_mut();
+                if writeable && !map.writeable {
+                    // this can be supported but not needed?
+                    panic!("Requested writable mapping but it is already mapped as read-only");
+                }
+                map
+            }
         };
-        let map = Map {
-            id,
-            data: b.clone(),
-            writeable: write,
-        };
-        Ok(map)
+        Ok(map.clone())
     }
 
     /// Resize file to fit the specified map id
@@ -247,10 +254,8 @@ impl Wal {
         let mut len = 0;
         for lock in self.maps.as_ref() {
             let mut maps = lock.lock();
-            maps.retain(|_k, v| {
-                v.downcast_mut::<Mmap>().is_none() &&
-                    // todo maybe don't put writeable maps into self.maps?
-                    v.downcast_mut::<MmapMut>().is_none()
+            maps.retain(|_k, Map { data, .. }| {
+                data.downcast_mut::<Mmap>().is_none() && data.downcast_mut::<MmapMut>().is_none()
             });
             len += maps.len();
         }
