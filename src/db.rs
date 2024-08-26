@@ -112,7 +112,7 @@ impl Db {
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
-        self.large_table.read().insert(k, position, &*self.wal)?;
+        self.large_table.read().insert(k, position, self)?;
         Ok(())
     }
 
@@ -121,11 +121,11 @@ impl Db {
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Remove(k.clone()));
         let position = self.wal_writer.write(&w)?;
-        Ok(self.large_table.read().remove(&k, position, &*self.wal)?)
+        Ok(self.large_table.read().remove(&k, position, self)?)
     }
 
     pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let Some(position) = self.large_table.read().get(k, &*self.wal)? else {
+        let Some(position) = self.large_table.read().get(k, self)? else {
             return Ok(None);
         };
         let entry = Self::read_entry_unmapped(&self.wal, position)?;
@@ -143,7 +143,7 @@ impl Db {
         let lock = self.large_table.read();
         for (k, w) in batch.into_writes() {
             let position = self.wal_writer.write(&w)?;
-            lock.insert(k, position, &*self.wal)?;
+            lock.insert(k, position, self)?;
         }
         Ok(())
     }
@@ -196,10 +196,7 @@ impl Db {
                 LargeTableSnapshotEntry::Empty => Ok(WalPosition::INVALID),
                 LargeTableSnapshotEntry::Clean(pos) => Ok(pos),
                 LargeTableSnapshotEntry::Dirty(version, index) => {
-                    let index = bincode::serialize(&index)?;
-                    let index = index.into();
-                    let w = PreparedWalWrite::new(&WalEntry::Index(index));
-                    let position = self.wal_writer.write(&w)?;
+                    let position = self.write_index(&index)?;
                     index_updates.push((i, version, position));
                     Ok(position)
                 }
@@ -207,6 +204,13 @@ impl Db {
             .collect::<DbResult<Box<[WalPosition]>>>()?;
         self.large_table.read().maybe_update_entries(index_updates);
         Ok(snapshot)
+    }
+
+    fn write_index(&self, index: &IndexTable) -> DbResult<WalPosition> {
+        let index = bincode::serialize(index)?;
+        let index = index.into();
+        let w = PreparedWalWrite::new(&WalEntry::Index(index));
+        Ok(self.wal_writer.write(&w)?)
     }
 
     fn read_entry_mapped(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
@@ -265,6 +269,30 @@ impl Loader for Wal {
         } else {
             panic!("Unexpected wal entry where expected record");
         }
+    }
+
+    fn unload_supported(&self) -> bool {
+        false
+    }
+
+    fn unload(&self, _data: IndexTable) -> DbResult<WalPosition> {
+        unimplemented!()
+    }
+}
+
+impl Loader for Db {
+    type Error = DbError;
+
+    fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
+        Loader::load(&*self.wal, position)
+    }
+
+    fn unload_supported(&self) -> bool {
+        true
+    }
+
+    fn unload(&self, data: IndexTable) -> DbResult<WalPosition> {
+        self.write_index(&data)
     }
 }
 

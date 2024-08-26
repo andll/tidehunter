@@ -166,6 +166,10 @@ pub trait Loader {
     type Error;
 
     fn load(&self, position: WalPosition) -> Result<IndexTable, Self::Error>;
+
+    fn unload_supported(&self) -> bool;
+
+    fn unload(&self, data: IndexTable) -> Result<WalPosition, Self::Error>;
 }
 
 impl LargeTableEntry {
