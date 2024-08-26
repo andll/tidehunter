@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
 
 pub struct LargeTable {
-    data: ShardedMutex<Box<[LargeTableEntry]>, LARGE_TABLE_MUTEXES>,
+    data: ShardedMutex<Row, LARGE_TABLE_MUTEXES>,
     size: usize,
 }
 
@@ -27,6 +27,10 @@ enum LargeTableEntryState {
     Unloaded(WalPosition),
     Loaded(WalPosition),
     Dirty(Version),
+}
+
+struct Row {
+    data: Box<[LargeTableEntry]>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,7 +81,8 @@ impl LargeTable {
             for _ in 0..per_mutex {
                 data.push(it.next().expect("Iterator has less data then table size"));
             }
-            rows.push(data.into_boxed_slice());
+            let data = data.into_boxed_slice();
+            rows.push(Row { data });
         }
         assert!(
             it.next().is_none(),
@@ -118,7 +123,7 @@ impl LargeTable {
         let pos = u32::from_le_bytes(p) as usize;
         let pos = pos % self.size;
         let (mutex, offset) = Self::locate(pos);
-        MutexGuard::map(self.data.lock(mutex), |l| &mut l[offset])
+        MutexGuard::map(self.data.lock(mutex), |l| &mut l.data[offset])
     }
 
     /// Provides a snapshot of this large table.
@@ -128,7 +133,7 @@ impl LargeTable {
         let mut last_added_position = None;
         for mutex in self.data.as_ref() {
             let lock = mutex.lock();
-            for entry in lock.iter() {
+            for entry in lock.data.iter() {
                 let snapshot = entry.snapshot();
                 LargeTableSnapshot::update_last_added_position(
                     &mut last_added_position,
@@ -150,7 +155,7 @@ impl LargeTable {
         for (index, version, position) in updates {
             let (mutex, offset) = Self::locate(index);
             let mut lock = self.data.lock(mutex);
-            let entry = &mut lock[offset];
+            let entry = &mut lock.data[offset];
             entry.maybe_set_to_loaded(version, position);
         }
     }
