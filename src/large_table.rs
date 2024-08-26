@@ -82,7 +82,8 @@ impl LargeTable {
                 data.push(it.next().expect("Iterator has less data then table size"));
             }
             let data = data.into_boxed_slice();
-            rows.push(Row { data });
+            let row = Row { data };
+            rows.push(row);
         }
         assert!(
             it.next().is_none(),
@@ -93,8 +94,7 @@ impl LargeTable {
     }
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
-        let mut entry = self.entry(&k);
-        entry.maybe_load(loader)?;
+        let mut entry = self.load_entry(&k, loader)?;
         entry.insert(k, v);
         Ok(())
     }
@@ -105,25 +105,29 @@ impl LargeTable {
         v: WalPosition,
         loader: &L,
     ) -> Result<bool, L::Error> {
-        let mut entry = self.entry(k);
-        entry.maybe_load(loader)?;
+        let mut entry = self.load_entry(k, loader)?;
         Ok(entry.remove(k, v))
     }
 
     pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
-        let mut entry = self.entry(k);
-        entry.maybe_load(loader)?;
+        let entry = self.load_entry(k, loader)?;
         Ok(entry.get(k))
     }
 
-    fn entry(&self, k: &[u8]) -> MappedMutexGuard<'_, LargeTableEntry> {
+    fn load_entry<L: Loader>(
+        &self,
+        k: &[u8],
+        loader: &L,
+    ) -> Result<MappedMutexGuard<'_, LargeTableEntry>, L::Error> {
         assert!(k.len() >= 4);
         let mut p = [0u8; 4];
         p.copy_from_slice(&k[..4]);
         let pos = u32::from_le_bytes(p) as usize;
         let pos = pos % self.size;
         let (mutex, offset) = Self::locate(pos);
-        MutexGuard::map(self.data.lock(mutex), |l| &mut l.data[offset])
+        let mut entry = MutexGuard::map(self.data.lock(mutex), |l| &mut l.data[offset]);
+        entry.maybe_load(loader)?;
+        Ok(entry)
     }
 
     /// Provides a snapshot of this large table.
@@ -215,7 +219,7 @@ impl LargeTableEntry {
         result
     }
 
-    pub fn get(&mut self, k: &[u8]) -> Option<WalPosition> {
+    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't get in unloaded state");
         }
