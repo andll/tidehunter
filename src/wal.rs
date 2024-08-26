@@ -1,5 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
-use crate::primitives::ShardedMutex;
+use crate::primitives::lru::Lru;
+use crate::primitives::sharded_mutex::ShardedMutex;
 use bytes::{Buf, BufMut};
 use memmap2::{Mmap, MmapMut};
 use minibytes::Bytes;
@@ -41,7 +42,14 @@ struct Map {
     writeable: bool,
 }
 
-type MapMutex = ShardedMutex<HashMap<u64, Map>, 16>;
+#[derive(Default)]
+struct Maps {
+    maps: HashMap<u64, Map>,
+    lru: Lru,
+}
+
+const MAP_MUTEXES: usize = 8;
+type MapMutex = ShardedMutex<Maps, MAP_MUTEXES>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
@@ -107,6 +115,7 @@ impl AtomicWalPosition {
 #[derive(Clone)]
 pub struct WalLayout {
     pub(crate) frag_size: u64,
+    pub(crate) max_maps: usize,
 }
 
 impl WalLayout {
@@ -116,6 +125,17 @@ impl WalLayout {
             self.frag_size,
             align(self.frag_size),
             "Frag size not aligned"
+        );
+        // todo - it makes more sense to round up/auto-correct config rather then panic here
+        assert_eq!(
+            self.max_maps % MAP_MUTEXES,
+            0,
+            "max_maps should be dividable by MAP_MUTEXES"
+        );
+        assert!(
+            self.max_maps_per_mutex() > 1,
+            "max_maps / MAP_MUTEXES should be at least 2, currently {}",
+            self.max_maps_per_mutex()
         );
     }
 
@@ -146,6 +166,11 @@ impl WalLayout {
         let start = self.frag_size * map;
         let end = self.frag_size * (map + 1);
         start..end
+    }
+
+    #[inline]
+    fn max_maps_per_mutex(&self) -> usize {
+        self.max_maps / MAP_MUTEXES
     }
 }
 
@@ -183,7 +208,7 @@ impl Wal {
 
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
         let mut maps = self.maps.lock(id as usize);
-        let map = match maps.entry(id) {
+        let map = match maps.maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
                 let data = unsafe {
@@ -213,7 +238,12 @@ impl Wal {
                 map
             }
         };
-        Ok(map.clone())
+        let map = map.clone();
+        maps.lru.insert(id);
+        if maps.maps.len() > self.layout.max_maps_per_mutex() {
+            maps.try_unload_one();
+        }
+        Ok(map)
     }
 
     /// Resize file to fit the specified map id
@@ -252,14 +282,51 @@ impl Wal {
     // Map can be freed when all buffers linked to this portion of a file are dropped
     pub fn cleanup(&self) -> usize {
         let mut len = 0;
-        for lock in self.maps.as_ref() {
-            let mut maps = lock.lock();
-            maps.retain(|_k, Map { data, .. }| {
-                data.downcast_mut::<Mmap>().is_none() && data.downcast_mut::<MmapMut>().is_none()
-            });
-            len += maps.len();
+        for maps in self.maps.as_ref() {
+            len += maps.lock().cleanup();
         }
         len
+    }
+}
+
+impl Maps {
+    /// Remove mappings that has no external references
+    pub fn cleanup(&mut self) -> usize {
+        self.maps.retain(|_k, Map { data, id, .. }| {
+            let retain = Self::has_references(data);
+            if !retain {
+                self.lru
+                    .remove(*id)
+                    .expect("Mapping was in maps but not in Lru");
+            }
+            retain
+        });
+        self.maps.len()
+    }
+
+    /// Try to unload the oldest mapping that has no external references
+    pub fn try_unload_one(&mut self) {
+        self.lru.pop_when(|id| Self::try_unload(&mut self.maps, id));
+    }
+
+    /// Try to unload the mapping, only if it has no external references
+    fn try_unload(maps: &mut HashMap<u64, Map>, id: u64) -> bool {
+        let map = maps.entry(id);
+        let Entry::Occupied(mut oc) = map else {
+            panic!("Can't run try_unload on map that does not exist")
+        };
+        if !Self::has_references(&mut oc.get_mut().data) {
+            oc.remove();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether Bytes has references other than one that is passed as an argument
+    fn has_references(data: &mut Bytes) -> bool {
+        // Bytes::downcast_mut returns Some only when it's the only reference
+        data.downcast_mut::<Mmap>().is_none() && data.downcast_mut::<MmapMut>().is_none()
     }
 }
 
@@ -371,7 +438,10 @@ mod tests {
     fn test_wal() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let file = dir.path().join("wal");
-        let layout = WalLayout { frag_size: 1024 };
+        let layout = WalLayout {
+            frag_size: 1024,
+            max_maps: MAP_MUTEXES * 2,
+        };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
@@ -434,7 +504,10 @@ mod tests {
 
     #[test]
     fn test_atomic_wal_position() {
-        let layout = WalLayout { frag_size: 512 };
+        let layout = WalLayout {
+            frag_size: 512,
+            max_maps: MAP_MUTEXES * 2,
+        };
         let position = AtomicWalPosition {
             layout,
             position: Arc::new(AtomicU64::new(0)),

@@ -5,13 +5,15 @@ use crate::wal::WalLayout;
 pub struct Config {
     frag_size: u64,
     large_table_size: usize,
+    max_maps: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            frag_size: 256 * 1024 * 1024,
+            frag_size: 128 * 1024 * 1024,
             large_table_size: 64 * 1024,
+            max_maps: 16, // Max 2 Gb mapped space
         }
     }
 }
@@ -21,6 +23,7 @@ impl Config {
         Self {
             frag_size: 1024 * 1024,
             large_table_size: 256,
+            max_maps: 4,
         }
     }
 
@@ -40,6 +43,7 @@ impl Config {
     pub fn wal_layout(&self) -> WalLayout {
         WalLayout {
             frag_size: self.frag_size,
+            max_maps: self.max_maps,
         }
     }
 }

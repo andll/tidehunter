@@ -1,4 +1,2 @@
-mod lru;
-mod sharded_mutex;
-
-pub use sharded_mutex::ShardedMutex;
+pub mod lru;
+pub mod sharded_mutex;
