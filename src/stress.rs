@@ -1,13 +1,14 @@
 use crate::config::Config;
 use crate::db::Db;
 use crate::metrics::Metrics;
+use bytes::BufMut;
 use clap::Parser;
 use parking_lot::RwLock;
-use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
+use rand::rngs::{StdRng, ThreadRng};
+use rand::{Rng, RngCore, SeedableRng};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 struct StressArgs {
@@ -19,6 +20,8 @@ struct StressArgs {
     key_len: usize,
     #[arg(long, short = 'w', help = "Blocks to write per thread")]
     writes: usize,
+    #[arg(long, short = 'r', help = "Blocks to read per thread")]
+    reads: usize,
 }
 
 pub fn main() {
@@ -28,42 +31,62 @@ pub fn main() {
     let config = Config::default();
     let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
     let db = Arc::new(db);
-    let mut threads = Vec::with_capacity(args.threads);
-    let start_lock = Arc::new(RwLock::new(()));
-    let start_w = start_lock.write();
-    for i in 0..args.threads {
-        let rng = StdRng::seed_from_u64(i as u64);
-        let thread = StressThread {
-            db: db.clone(),
-            start_lock: start_lock.clone(),
-            args: args.clone(),
-            rng,
-        };
-        let thread = thread::spawn(move || thread.run());
-        threads.push(thread);
-    }
-    let start = Instant::now();
-    drop(start_w);
-    for t in threads {
-        t.join().unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!("Done in {:?}", elapsed);
-    let written = args.writes * args.threads;
-    let written_bytes = written * args.write_size;
+    let stress = Stress { db, args };
+    let elapsed = stress.measure(StressThread::run_writes);
+    let written = stress.args.writes * stress.args.threads;
+    let written_bytes = written * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
     println!(
-        "{} writes/s, {} bytes/sec",
+        "Done in {elapsed:?}: {} writes/s, {}/sec",
         dec_div(written / msecs * 1000),
         byte_div(written_bytes / msecs * 1000)
     );
+    let elapsed = stress.measure(StressThread::run_reads);
+    let read = stress.args.reads * stress.args.threads;
+    let read_bytes = read * stress.args.write_size;
+    let msecs = elapsed.as_millis() as usize;
+    println!(
+        "Done in {elapsed:?}: {} reads/s, {}/sec",
+        dec_div(read / msecs * 1000),
+        byte_div(read_bytes / msecs * 1000)
+    );
+}
+
+struct Stress {
+    db: Arc<Db>,
+    args: Arc<StressArgs>,
+}
+
+impl Stress {
+    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(&self, f: F) -> Duration {
+        let mut threads = Vec::with_capacity(self.args.threads);
+        let start_lock = Arc::new(RwLock::new(()));
+        let start_w = start_lock.write();
+        for index in 0..self.args.threads {
+            let thread = StressThread {
+                db: self.db.clone(),
+                start_lock: start_lock.clone(),
+                args: self.args.clone(),
+                index: index as u64,
+            };
+            let f = f.clone();
+            let thread = thread::spawn(move || f(thread));
+            threads.push(thread);
+        }
+        let start = Instant::now();
+        drop(start_w);
+        for t in threads {
+            t.join().unwrap();
+        }
+        start.elapsed()
+    }
 }
 
 fn dec_div(n: usize) -> String {
     const M: usize = 1_000_000;
     const K: usize = 1_000;
     if n > M {
-        format!("{}M ", n / M)
+        format!("{}M", n / M)
     } else if n > K {
         format!("{}K", n / K)
     } else {
@@ -75,7 +98,7 @@ fn byte_div(n: usize) -> String {
     const K: usize = 1_024;
     const M: usize = K * K;
     if n > M {
-        format!("{}Mb ", n / M)
+        format!("{}Mb", n / M)
     } else if n > K {
         format!("{}Kb", n / K)
     } else {
@@ -87,18 +110,51 @@ struct StressThread {
     db: Arc<Db>,
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
-    rng: StdRng,
+    index: u64,
 }
 
 impl StressThread {
-    pub fn run(mut self) {
+    pub fn run_writes(self) {
         let _ = self.start_lock.read();
-        for _ in 0..self.args.writes {
-            let mut data = vec![0u8; self.args.write_size];
-            let mut key = vec![0u8; self.args.key_len];
-            self.rng.fill_bytes(&mut key);
-            self.rng.fill_bytes(&mut data);
-            self.db.insert(key, data).unwrap();
+        for pos in 0..self.args.writes {
+            let (key, value) = self.key_value(pos);
+            self.db.insert(key, value).unwrap();
         }
+    }
+
+    pub fn run_reads(self) {
+        let _ = self.start_lock.read();
+        let mut pos_rng = ThreadRng::default();
+        for _ in 0..self.args.reads {
+            let pos = pos_rng.gen_range(0..self.args.writes);
+            let (key, value) = self.key_value(pos);
+            let found_value = self
+                .db
+                .get(&key)
+                .unwrap()
+                .expect("Expected value not found");
+            assert_eq!(
+                &value[..],
+                &found_value[..],
+                "Found value does not match expected value"
+            );
+        }
+    }
+
+    fn key_value(&self, pos: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut value = vec![0u8; self.args.write_size];
+        let mut key = vec![0u8; self.args.key_len];
+        let mut rng = self.rng_at(pos as u64);
+        rng.fill_bytes(&mut key);
+        rng.fill_bytes(&mut value);
+        (key, value)
+    }
+
+    fn rng_at(&self, pos: u64) -> StdRng {
+        let mut seed = <StdRng as SeedableRng>::Seed::default();
+        let mut writer = &mut seed[..];
+        writer.put_u64(self.index);
+        writer.put_u64(pos);
+        StdRng::from_seed(seed)
     }
 }
