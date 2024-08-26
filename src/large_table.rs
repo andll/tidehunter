@@ -1,13 +1,16 @@
+use crate::config::Config;
+use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
+use std::sync::Arc;
 
 pub struct LargeTable {
-    data: ShardedMutex<Row, LARGE_TABLE_MUTEXES>,
-    size: usize,
+    data: Box<ShardedMutex<Row, LARGE_TABLE_MUTEXES>>,
+    config: Arc<Config>,
 }
 
 const LARGE_TABLE_MUTEXES: usize = 1024;
@@ -30,6 +33,7 @@ enum LargeTableEntryState {
 }
 
 struct Row {
+    lru: Lru,
     data: Box<[LargeTableEntry]>,
 }
 
@@ -50,20 +54,29 @@ pub(crate) enum LargeTableSnapshotEntry {
 }
 
 impl LargeTable {
-    pub fn new(size: usize) -> Self {
-        let it = repeat_with(|| LargeTableEntry::new_empty()).take(size);
-        Self::from_iterator_size(it, size)
+    pub fn new(config: Arc<Config>) -> Self {
+        let it = repeat_with(|| LargeTableEntry::new_empty()).take(config.large_table_size());
+        Self::from_iterator_size(it, config)
     }
 
-    pub fn from_unloaded(snapshot: &[WalPosition]) -> Self {
+    pub fn from_unloaded(snapshot: &[WalPosition], config: Arc<Config>) -> Self {
         let size = snapshot.len();
+        assert_eq!(
+            size,
+            config.large_table_size(),
+            "Configured large table size does not match loaded snapshot size"
+        );
         let it = snapshot
             .into_iter()
             .map(LargeTableEntry::from_snapshot_position);
-        Self::from_iterator_size(it, size)
+        Self::from_iterator_size(it, config)
     }
 
-    fn from_iterator_size(mut it: impl Iterator<Item = LargeTableEntry>, size: usize) -> Self {
+    fn from_iterator_size(
+        mut it: impl Iterator<Item = LargeTableEntry>,
+        config: Arc<Config>,
+    ) -> Self {
+        let size = config.large_table_size();
         assert!(size <= u32::MAX as usize);
         assert!(
             size >= LARGE_TABLE_MUTEXES,
@@ -74,6 +87,10 @@ impl LargeTable {
             0,
             "Large table size should be dividable by LARGE_TABLE_MUTEXES"
         );
+        assert!(
+            config.max_loaded() > 1,
+            "max_loaded should be greater then 1"
+        );
         let per_mutex = size / LARGE_TABLE_MUTEXES;
         let mut rows = Vec::with_capacity(size);
         for _ in 0..LARGE_TABLE_MUTEXES {
@@ -82,15 +99,18 @@ impl LargeTable {
                 data.push(it.next().expect("Iterator has less data then table size"));
             }
             let data = data.into_boxed_slice();
-            let row = Row { data };
+            let row = Row {
+                data,
+                lru: Lru::default(),
+            };
             rows.push(row);
         }
         assert!(
             it.next().is_none(),
             "Iterator has more data then table size"
         );
-        let data = ShardedMutex::from_iterator(rows.into_iter());
-        Self { data, size }
+        let data = Box::new(ShardedMutex::from_iterator(rows.into_iter()));
+        Self { data, config }
     }
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
@@ -123,9 +143,22 @@ impl LargeTable {
         let mut p = [0u8; 4];
         p.copy_from_slice(&k[..4]);
         let pos = u32::from_le_bytes(p) as usize;
-        let pos = pos % self.size;
+        let pos = pos % self.config.large_table_size();
         let (mutex, offset) = Self::locate(pos);
-        let mut entry = MutexGuard::map(self.data.lock(mutex), |l| &mut l.data[offset]);
+        let mut row = self.data.lock(mutex);
+        row.lru.insert(offset as u64);
+        if loader.unload_supported() && row.lru.len() > self.config.max_loaded() {
+            // todo - try to unload Loaded entry even if unload is not supported
+            let unload = row.lru.pop().expect("Lru is not empty");
+            assert_ne!(
+                unload, offset as u64,
+                "Attempting unload entry we are just trying to load"
+            );
+            // todo - we can try different approaches,
+            // for example prioritize unloading Loaded entries over Dirty entries
+            row.data[unload as usize].unload(loader)?;
+        }
+        let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
         Ok(entry)
     }
@@ -133,9 +166,9 @@ impl LargeTable {
     /// Provides a snapshot of this large table.
     /// Takes &mut reference to ensure consistency of last_added_position.
     pub fn snapshot(&mut self) -> LargeTableSnapshot {
-        let mut data = Vec::with_capacity(self.size);
+        let mut data = Vec::with_capacity(self.config.large_table_size());
         let mut last_added_position = None;
-        for mutex in self.data.as_ref() {
+        for mutex in self.data.as_ref().as_ref() {
             let lock = mutex.lock();
             for entry in lock.data.iter() {
                 let snapshot = entry.snapshot();
@@ -178,7 +211,7 @@ pub trait Loader {
 
     fn unload_supported(&self) -> bool;
 
-    fn unload(&self, data: IndexTable) -> Result<WalPosition, Self::Error>;
+    fn unload(&self, data: &IndexTable) -> Result<WalPosition, Self::Error>;
 }
 
 impl LargeTableEntry {
@@ -253,11 +286,17 @@ impl LargeTableEntry {
         }
     }
 
-    pub fn unload_clean(&mut self) {
-        if let LargeTableEntryState::Loaded(position) = self.state {
-            self.data.data.clear();
-            self.state = LargeTableEntryState::Unloaded(position);
-        }
+    pub fn unload<L: Loader>(&mut self, _loader: &L) -> Result<(), L::Error> {
+        // if let LargeTableEntryState::Loaded(position) = self.state {
+        //     self.state = LargeTableEntryState::Unloaded(position);
+        //     self.data.clear();
+        // } else if let LargeTableEntryState::Dirty(_) = self.state {
+        //     let position = loader.unload(&self.data)?;
+        //     // todo trigger re-index to cap memory during restart?
+        //     self.state = LargeTableEntryState::Unloaded(position);
+        //     self.data.clear();
+        // }
+        Ok(())
     }
 
     fn prepare_for_mutation(&mut self) {
@@ -295,6 +334,10 @@ impl IndexTable {
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
         let pos = self.data.binary_search_by_key(&k, |(k, _v)| &k[..]).ok()?;
         Some(self.data.get(pos).unwrap().1)
+    }
+
+    pub fn clear(&mut self) {
+        self.data = Vec::new();
     }
 }
 

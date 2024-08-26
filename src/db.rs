@@ -30,15 +30,15 @@ pub type DbResult<T> = Result<T, DbError>;
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 
 impl Db {
-    pub fn open(path: &Path, config: &Config, metrics: Arc<Metrics>) -> DbResult<Self> {
+    pub fn open(path: &Path, config: Arc<Config>, metrics: Arc<Metrics>) -> DbResult<Self> {
         let cr = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path.join("cr"))?;
         let (control_region_store, control_region) =
-            Self::read_or_create_control_region(&cr, config)?;
-        let large_table = LargeTable::from_unloaded(control_region.snapshot());
+            Self::read_or_create_control_region(&cr, &config)?;
+        let large_table = LargeTable::from_unloaded(control_region.snapshot(), config.clone());
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
@@ -275,7 +275,7 @@ impl Loader for Wal {
         false
     }
 
-    fn unload(&self, _data: IndexTable) -> DbResult<WalPosition> {
+    fn unload(&self, _data: &IndexTable) -> DbResult<WalPosition> {
         unimplemented!()
     }
 }
@@ -291,8 +291,8 @@ impl Loader for Db {
         true
     }
 
-    fn unload(&self, data: IndexTable) -> DbResult<WalPosition> {
-        self.write_index(&data)
+    fn unload(&self, data: &IndexTable) -> DbResult<WalPosition> {
+        self.write_index(data)
     }
 }
 
@@ -387,23 +387,23 @@ mod test {
     #[test]
     fn db_test() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
-        let config = Config::small();
+        let config = Arc::new(Config::small());
         {
-            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
             db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
             db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
             db.rebuild_control_region().unwrap();
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
             // nothing replayed from wal since we just rebuilt the control region
             assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 0);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
@@ -413,13 +413,13 @@ mod test {
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
             assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), &config, Metrics::new().clone()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), Metrics::new().clone()).unwrap();
             db.insert(vec![3, 4, 5, 6], vec![9]).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![9].into()), db.get(&[3, 4, 5, 6]).unwrap());
@@ -429,8 +429,8 @@ mod test {
     #[test]
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
-        let config = Config::small();
-        let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+        let config = Arc::new(Config::small());
+        let db = Db::open(dir.path(), config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
         batch.write(vec![5, 6, 7, 8], vec![15]);
         batch.write(vec![6, 7, 8, 9], vec![17]);
@@ -442,9 +442,9 @@ mod test {
     #[test]
     fn test_remove() {
         let dir = tempdir::TempDir::new("test-remove").unwrap();
-        let config = Config::small();
+        let config = Arc::new(Config::small());
         {
-            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
             db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
             db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
@@ -455,7 +455,7 @@ mod test {
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
             db.insert(vec![1, 2, 3, 4], vec![9, 10]).unwrap();
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
@@ -465,7 +465,7 @@ mod test {
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), &config, metrics.clone()).unwrap();
+            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
             assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());

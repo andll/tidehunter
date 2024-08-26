@@ -28,8 +28,8 @@ pub fn main() {
     let args = StressArgs::parse();
     let args = Arc::new(args);
     let dir = tempdir::TempDir::new("stress").unwrap();
-    let config = Config::default();
-    let db = Db::open(dir.path(), &config, Metrics::new()).unwrap();
+    let config = Arc::new(Config::default());
+    let db = Db::open(dir.path(), config, Metrics::new()).unwrap();
     let db = Arc::new(db);
     let stress = Stress { db, args };
     let elapsed = stress.measure(StressThread::run_writes);

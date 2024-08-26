@@ -6,6 +6,8 @@ pub struct Config {
     frag_size: u64,
     large_table_size: usize,
     max_maps: usize,
+    /// Maximum number of loaded entries per LargeTable row
+    max_loaded: usize,
 }
 
 impl Default for Config {
@@ -14,6 +16,7 @@ impl Default for Config {
             frag_size: 128 * 1024 * 1024,
             large_table_size: 64 * 1024,
             max_maps: 16, // Max 2 Gb mapped space
+            max_loaded: 16,
         }
     }
 }
@@ -24,6 +27,7 @@ impl Config {
             frag_size: 1024 * 1024,
             large_table_size: 1024,
             max_maps: 16,
+            max_loaded: 1024,
         }
     }
 
@@ -45,5 +49,9 @@ impl Config {
             frag_size: self.frag_size,
             max_maps: self.max_maps,
         }
+    }
+
+    pub fn max_loaded(&self) -> usize {
+        self.max_loaded
     }
 }

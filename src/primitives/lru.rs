@@ -55,6 +55,11 @@ impl Lru {
             None
         }
     }
+
+    pub fn len(&self) -> usize {
+        debug_assert_eq!(self.map.len(), self.rmap.len());
+        self.map.len()
+    }
 }
 
 #[test]
