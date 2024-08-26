@@ -6,6 +6,7 @@ use clap::Parser;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,7 +30,8 @@ pub fn main() {
     let args = Arc::new(args);
     let dir = tempdir::TempDir::new("stress").unwrap();
     let config = Arc::new(Config::default());
-    let db = Db::open(dir.path(), config, Metrics::new()).unwrap();
+    let metrics = Metrics::new();
+    let db = Db::open(dir.path(), config, metrics.clone()).unwrap();
     let db = Arc::new(db);
     let stress = Stress { db, args };
     let elapsed = stress.measure(StressThread::run_writes);
@@ -50,6 +52,10 @@ pub fn main() {
         dec_div(read / msecs * 1000),
         byte_div(read_bytes / msecs * 1000)
     );
+    println!(
+        "Max index size {} entries",
+        metrics.max_index_size.load(Ordering::Relaxed)
+    )
 }
 
 struct Stress {

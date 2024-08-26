@@ -7,6 +7,7 @@ use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub struct LargeTable {
@@ -127,6 +128,17 @@ impl LargeTable {
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
         let mut entry = self.load_entry(&k, loader)?;
         entry.insert(k, v);
+        let index_size = entry.data.data.len();
+        self.metrics
+            .max_index_size
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                if index_size > old {
+                    Some(index_size)
+                } else {
+                    None
+                }
+            })
+            .ok();
         Ok(())
     }
 
