@@ -1,7 +1,7 @@
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
-use parking_lot::MutexGuard;
+use parking_lot::{MappedMutexGuard, MutexGuard};
 use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
 
@@ -43,13 +43,6 @@ pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
     Dirty(Version, IndexTable),
-}
-
-macro_rules! entry {
-    ($self:expr, $k:expr, $entry:ident) => {
-        let (mut lock, offset) = $self.entry($k);
-        let $entry = &mut lock[offset];
-    };
 }
 
 impl LargeTable {
@@ -95,32 +88,32 @@ impl LargeTable {
     }
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: L) -> Result<(), L::Error> {
-        entry!(self, &k, entry);
+        let mut entry = self.entry(&k);
         entry.maybe_load(loader)?;
         entry.insert(k, v);
         Ok(())
     }
 
     pub fn remove<L: Loader>(&self, k: &[u8], v: WalPosition, loader: L) -> Result<bool, L::Error> {
-        entry!(self, &k, entry);
+        let mut entry = self.entry(k);
         entry.maybe_load(loader)?;
         Ok(entry.remove(k, v))
     }
 
     pub fn get<L: Loader>(&self, k: &[u8], loader: L) -> Result<Option<WalPosition>, L::Error> {
-        entry!(self, &k, entry);
+        let mut entry = self.entry(k);
         entry.maybe_load(loader)?;
         Ok(entry.get(k))
     }
 
-    fn entry(&self, k: &[u8]) -> (MutexGuard<'_, Box<[LargeTableEntry]>>, usize) {
+    fn entry(&self, k: &[u8]) -> MappedMutexGuard<'_, LargeTableEntry> {
         assert!(k.len() >= 4);
         let mut p = [0u8; 4];
         p.copy_from_slice(&k[..4]);
         let pos = u32::from_le_bytes(p) as usize;
         let pos = pos % self.size;
         let (mutex, offset) = Self::locate(pos);
-        (self.data.lock(mutex), offset)
+        MutexGuard::map(self.data.lock(mutex), |l| &mut l[offset])
     }
 
     /// Provides a snapshot of this large table.
