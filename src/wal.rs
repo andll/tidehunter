@@ -2,7 +2,7 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use bytes::{Buf, BufMut};
-use memmap2::{Mmap, MmapMut};
+use memmap2::{MmapMut};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

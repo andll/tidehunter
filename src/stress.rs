@@ -2,7 +2,6 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::metrics::Metrics;
 use clap::Parser;
-use minibytes::Bytes;
 use parking_lot::RwLock;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
