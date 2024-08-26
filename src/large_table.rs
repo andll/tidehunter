@@ -4,7 +4,6 @@ use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
-use std::time::Instant;
 
 pub struct LargeTable {
     data: ShardedMutex<Box<[LargeTableEntry]>, LARGE_TABLE_MUTEXES>,
@@ -20,7 +19,6 @@ pub struct LargeTableEntry {
     data: IndexTable,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
-    last_accessed: Instant,
 }
 
 #[derive(PartialEq)]
@@ -164,13 +162,6 @@ impl LargeTable {
         let offset = pos / LARGE_TABLE_MUTEXES;
         (mutex, offset)
     }
-
-    // todo cleanup
-    // pub fn unload_clean(&self, max_last_accessed: Instant) {
-    //     for entry in &self.data {
-    //         entry.lock().unload_clean(max_last_accessed);
-    //     }
-    // }
 }
 
 pub trait Loader {
@@ -185,7 +176,6 @@ impl LargeTableEntry {
             data: IndexTable { data: vec![] },
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
-            last_accessed: Instant::now(),
         }
     }
 
@@ -194,7 +184,6 @@ impl LargeTableEntry {
             data: IndexTable { data: vec![] },
             last_added_position: None,
             state: LargeTableEntryState::Empty,
-            last_accessed: Instant::now(),
         }
     }
 
@@ -223,7 +212,6 @@ impl LargeTableEntry {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't get in unloaded state");
         }
-        self.last_accessed = Instant::now();
         self.data.get(k)
     }
 
@@ -254,11 +242,8 @@ impl LargeTableEntry {
         }
     }
 
-    pub fn unload_clean(&mut self, max_last_accessed: Instant) {
+    pub fn unload_clean(&mut self) {
         if let LargeTableEntryState::Loaded(position) = self.state {
-            if self.last_accessed > max_last_accessed {
-                return;
-            }
             self.data.data.clear();
             self.state = LargeTableEntryState::Unloaded(position);
         }
@@ -275,7 +260,6 @@ impl LargeTableEntry {
                 panic!("Mutation is not allowed on the Unloaded entry")
             }
         }
-        self.last_accessed = Instant::now();
     }
 }
 
