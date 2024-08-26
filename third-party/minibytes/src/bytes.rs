@@ -152,6 +152,14 @@ where
     /// Returns None if the type mismatches, or the internal reference count is
     /// not 0.
     pub fn downcast_mut<A: Any>(&mut self) -> Option<&mut A> {
+        let any = self.downcast_any()?;
+        any.downcast_mut()
+    }
+
+    /// Attempt to downcast to an exclusive mut reference.
+    ///
+    /// Returns None if the internal reference count is not 0.
+    pub fn downcast_any(&mut self) -> Option<&mut dyn Any> {
         let arc_owner = match self.owner.as_mut() {
             None => return None,
             Some(owner) => owner,
@@ -160,8 +168,7 @@ where
             None => return None,
             Some(owner) => owner,
         };
-        let any = owner.as_any_mut();
-        any.downcast_mut()
+        Some(owner.as_any_mut())
     }
 }
 

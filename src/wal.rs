@@ -325,8 +325,8 @@ impl Maps {
 
     /// Returns whether Bytes has references other than one that is passed as an argument
     fn has_references(data: &mut Bytes) -> bool {
-        // Bytes::downcast_mut returns Some only when it's the only reference
-        data.downcast_mut::<Mmap>().is_none() && data.downcast_mut::<MmapMut>().is_none()
+        // Bytes::downcast_any returns Some only when it's the only reference
+        data.downcast_any().is_none()
     }
 }
 
