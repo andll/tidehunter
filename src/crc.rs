@@ -47,12 +47,9 @@ impl CrcFrame {
         if b.len() < pos + Self::CRC_HEADER_LENGTH {
             return Err(CrcReadError::OutOfBoundsHeader);
         }
-        let mut len = [0u8; 4];
-        len.copy_from_slice(&b[pos..pos + 4]);
-        let len = u32::from_be_bytes(len);
-        let mut crc = [0u8; 4];
-        crc.copy_from_slice(&b[pos + 4..pos + 8]);
-        let crc = u32::from_be_bytes(crc);
+        let mut h = &b[pos..];
+        let len = h.get_u32();
+        let crc = h.get_u32();
         if len == u32::MAX && crc == u32::MAX {
             return Err(CrcReadError::SkipMarker);
         }
