@@ -255,7 +255,7 @@ impl LargeTableEntry {
             LargeTableEntryState::Loaded(_) => {
                 self.state = LargeTableEntryState::Dirty(Version::ZERO)
             }
-            LargeTableEntryState::Dirty(version) => version.increment(),
+            LargeTableEntryState::Dirty(version) => version.wrapping_increment(),
             LargeTableEntryState::Unloaded(_) => {
                 panic!("Mutation is not allowed on the Unloaded entry")
             }
@@ -314,7 +314,14 @@ impl Version {
     pub const ZERO: Version = Version(0);
     pub const LENGTH: usize = 8;
 
-    pub fn increment(&mut self) {
-        self.0 += 1;
+    pub fn wrapping_increment(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+
+    pub fn checked_increment(&mut self) {
+        self.0 = self
+            .0
+            .checked_add(1)
+            .expect("Can not increment id: too large");
     }
 }

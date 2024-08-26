@@ -244,7 +244,7 @@ impl ControlRegionStore {
     }
 
     fn increment_version(&mut self) -> Version {
-        self.last_version.increment();
+        self.last_version.checked_increment();
         self.last_version
     }
 }
