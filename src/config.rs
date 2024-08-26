@@ -22,7 +22,7 @@ impl Config {
     pub fn small() -> Self {
         Self {
             frag_size: 1024 * 1024,
-            large_table_size: 256,
+            large_table_size: 1024,
             max_maps: 16,
         }
     }
