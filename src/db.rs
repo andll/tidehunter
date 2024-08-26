@@ -128,7 +128,7 @@ impl Db {
         let Some(position) = self.large_table.read().get(k, &*self.wal)? else {
             return Ok(None);
         };
-        let entry = Self::read_entry(&self.wal, position)?;
+        let entry = Self::read_entry_unmapped(&self.wal, position)?;
         let value = if let WalEntry::Record(wal_key, v) = entry {
             debug_assert_eq!(wal_key.as_ref(), k);
             v
@@ -209,8 +209,13 @@ impl Db {
         Ok(snapshot)
     }
 
-    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
+    fn read_entry_mapped(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
         let entry = wal.read(position)?;
+        Ok(WalEntry::from_bytes(entry))
+    }
+
+    fn read_entry_unmapped(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
+        let entry = wal.read_unmapped(position)?;
         Ok(WalEntry::from_bytes(entry))
     }
 }
@@ -253,7 +258,7 @@ impl Loader for &Wal {
     type Error = DbError;
 
     fn load(self, position: WalPosition) -> DbResult<IndexTable> {
-        let entry = Db::read_entry(self, position)?;
+        let entry = Db::read_entry_mapped(self, position)?;
         if let WalEntry::Index(bytes) = entry {
             let entry = bincode::deserialize(&bytes)?;
             Ok(entry)

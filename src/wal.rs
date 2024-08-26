@@ -1,7 +1,7 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use memmap2::MmapMut;
 use minibytes::Bytes;
 use parking_lot::Mutex;
@@ -10,6 +10,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -211,6 +212,39 @@ impl Wal {
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
+    }
+
+    pub fn read_unmapped(&self, pos: WalPosition) -> Result<Bytes, WalError> {
+        const INITIAL_READ_SIZE: usize = 1024;
+        let (map, offset) = self.layout.locate(pos.0);
+        if let Some(map) = self.get_map(map) {
+            Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
+        } else {
+            let mut buf = BytesMut::zeroed(INITIAL_READ_SIZE);
+            let read = self.file.read_at(&mut buf, pos.0)?;
+            assert!(read > CrcFrame::CRC_HEADER_LENGTH); // todo this is not actually guaranteed
+            let size = CrcFrame::read_size(&buf[..read]);
+            let target_size = size + CrcFrame::CRC_HEADER_LENGTH;
+            if target_size > read {
+                // todo more test coverage for those cases including when read != INITIAL_READ_SIZE
+                if target_size > INITIAL_READ_SIZE {
+                    let more = target_size - INITIAL_READ_SIZE;
+                    buf.put_bytes(0, more);
+                }
+                self.file
+                    .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
+            }
+            let bytes = bytes::Bytes::from(buf).into();
+            Ok(CrcFrame::read_from_bytes(&bytes, 0)?)
+        }
+    }
+
+    fn get_map(&self, id: u64) -> Option<Map> {
+        let mut maps = self.maps.lock(id as usize);
+        let map = maps.maps.get(&id)?.clone();
+        maps.lru.insert(id);
+        // do not try to unload since we did not load anything
+        Some(map)
     }
 
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
@@ -504,6 +538,11 @@ mod tests {
             assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
             assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().as_ref());
+
+            assert_eq!(&[1, 2, 3], wal.read_unmapped(p1).unwrap().as_ref());
+            assert_eq!(&[] as &[u8], wal.read_unmapped(p2).unwrap().as_ref());
+            assert_eq!(&large, wal.read_unmapped(p3).unwrap().as_ref());
+            assert_eq!(&[91, 92, 93], wal.read_unmapped(p4).unwrap().as_ref());
         }
         // we wrote into two frags
         assert_eq!(2048, fs::metadata(file).unwrap().len());
