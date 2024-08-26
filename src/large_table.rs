@@ -87,20 +87,25 @@ impl LargeTable {
         Self { data, size }
     }
 
-    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: L) -> Result<(), L::Error> {
+    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
         let mut entry = self.entry(&k);
         entry.maybe_load(loader)?;
         entry.insert(k, v);
         Ok(())
     }
 
-    pub fn remove<L: Loader>(&self, k: &[u8], v: WalPosition, loader: L) -> Result<bool, L::Error> {
+    pub fn remove<L: Loader>(
+        &self,
+        k: &[u8],
+        v: WalPosition,
+        loader: &L,
+    ) -> Result<bool, L::Error> {
         let mut entry = self.entry(k);
         entry.maybe_load(loader)?;
         Ok(entry.remove(k, v))
     }
 
-    pub fn get<L: Loader>(&self, k: &[u8], loader: L) -> Result<Option<WalPosition>, L::Error> {
+    pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
         let mut entry = self.entry(k);
         entry.maybe_load(loader)?;
         Ok(entry.get(k))
@@ -160,7 +165,7 @@ impl LargeTable {
 pub trait Loader {
     type Error;
 
-    fn load(self, position: WalPosition) -> Result<IndexTable, Self::Error>;
+    fn load(&self, position: WalPosition) -> Result<IndexTable, Self::Error>;
 }
 
 impl LargeTableEntry {
@@ -208,7 +213,7 @@ impl LargeTableEntry {
         self.data.get(k)
     }
 
-    pub fn maybe_load<L: Loader>(&mut self, loader: L) -> Result<(), L::Error> {
+    pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         let LargeTableEntryState::Unloaded(position) = self.state else {
             return Ok(());
         };

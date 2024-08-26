@@ -254,10 +254,10 @@ impl ControlRegionStore {
     }
 }
 
-impl Loader for &Wal {
+impl Loader for Wal {
     type Error = DbError;
 
-    fn load(self, position: WalPosition) -> DbResult<IndexTable> {
+    fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
         let entry = Db::read_entry_mapped(self, position)?;
         if let WalEntry::Index(bytes) = entry {
             let entry = bincode::deserialize(&bytes)?;
