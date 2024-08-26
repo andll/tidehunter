@@ -25,12 +25,14 @@ pub struct AbstractBytes<T: ?Sized> {
 /// The actual storage owning the bytes.
 pub trait AbstractOwner<T: ?Sized>: AsRef<T> + Send + Sync + 'static {
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl<T: BytesOwner> AbstractOwner<[u8]> for T {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 // AbstractOwner<T> is Send + Sync and AbstractBytes<T> is immutable.
@@ -146,6 +148,19 @@ where
     pub(crate) fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
+
+    /// Attempt to downcast to a reference.
+    ///
+    /// Returns None if the type mismatches.
+    pub fn downcast_ref<A: Any>(&self) -> Option<&A> {
+        let arc_owner = match self.owner.as_ref() {
+            None => return None,
+            Some(owner) => owner,
+        };
+        let any = arc_owner.as_any();
+        any.downcast_ref()
+    }
+
 
     /// Attempt to downcast to an exclusive mut reference.
     ///

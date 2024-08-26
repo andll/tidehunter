@@ -72,6 +72,13 @@ impl WalWriter {
                 buf.copy_from_slice(skip_marker.as_ref());
             }
             self.wal.extend_to_map(map_id)?;
+            let mmap_mut = map
+                .data
+                .downcast_ref::<MmapMut>()
+                .expect("Can't downcast writable map to MmapMut");
+            // Asynchronously flush the filled mem map
+            // todo evaluate to make sure this does not hurt performance in real app
+            mmap_mut.flush_async()?;
             *map = self.wal.map(map_id, true)?;
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
