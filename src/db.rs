@@ -38,7 +38,8 @@ impl Db {
             .open(path.join("cr"))?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(&cr, &config)?;
-        let large_table = LargeTable::from_unloaded(control_region.snapshot(), config.clone());
+        let large_table =
+            LargeTable::from_unloaded(control_region.snapshot(), config.clone(), metrics.clone());
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;

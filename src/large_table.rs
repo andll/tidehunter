@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::metrics::Metrics;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 pub struct LargeTable {
     data: Box<ShardedMutex<Row, LARGE_TABLE_MUTEXES>>,
     config: Arc<Config>,
+    metrics: Arc<Metrics>,
 }
 
 const LARGE_TABLE_MUTEXES: usize = 1024;
@@ -54,12 +56,16 @@ pub(crate) enum LargeTableSnapshotEntry {
 }
 
 impl LargeTable {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
         let it = repeat_with(|| LargeTableEntry::new_empty()).take(config.large_table_size());
-        Self::from_iterator_size(it, config)
+        Self::from_iterator_size(it, config, metrics)
     }
 
-    pub fn from_unloaded(snapshot: &[WalPosition], config: Arc<Config>) -> Self {
+    pub fn from_unloaded(
+        snapshot: &[WalPosition],
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let size = snapshot.len();
         assert_eq!(
             size,
@@ -69,12 +75,13 @@ impl LargeTable {
         let it = snapshot
             .into_iter()
             .map(LargeTableEntry::from_snapshot_position);
-        Self::from_iterator_size(it, config)
+        Self::from_iterator_size(it, config, metrics)
     }
 
     fn from_iterator_size(
         mut it: impl Iterator<Item = LargeTableEntry>,
         config: Arc<Config>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let size = config.large_table_size();
         assert!(size <= u32::MAX as usize);
@@ -110,7 +117,11 @@ impl LargeTable {
             "Iterator has more data then table size"
         );
         let data = Box::new(ShardedMutex::from_iterator(rows.into_iter()));
-        Self { data, config }
+        Self {
+            data,
+            config,
+            metrics,
+        }
     }
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
