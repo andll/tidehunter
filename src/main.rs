@@ -3,6 +3,7 @@ pub mod config;
 mod control;
 mod crc;
 pub mod db;
+mod index_table;
 mod large_table;
 pub mod metrics;
 mod primitives;

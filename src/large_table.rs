@@ -1,11 +1,11 @@
 use crate::config::Config;
+use crate::index_table::IndexTable;
 use crate::metrics::Metrics;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
-use serde::{Deserialize, Serialize};
 use std::iter::repeat_with;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -38,11 +38,6 @@ enum LargeTableEntryState {
 struct Row {
     lru: Lru,
     data: Box<[LargeTableEntry]>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct IndexTable {
-    data: Vec<(Bytes, WalPosition)>,
 }
 
 pub(crate) struct LargeTableSnapshot {
@@ -128,7 +123,7 @@ impl LargeTable {
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
         let mut entry = self.load_entry(&k, loader)?;
         entry.insert(k, v);
-        let index_size = entry.data.data.len();
+        let index_size = entry.data.len();
         self.metrics
             .max_index_size
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
@@ -240,7 +235,7 @@ pub trait Loader {
 impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
-            data: IndexTable { data: vec![] },
+            data: IndexTable::default(),
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
         }
@@ -248,7 +243,7 @@ impl LargeTableEntry {
 
     pub fn new_empty() -> Self {
         Self {
-            data: IndexTable { data: vec![] },
+            data: IndexTable::default(),
             last_added_position: None,
             state: LargeTableEntryState::Empty,
         }
@@ -333,34 +328,6 @@ impl LargeTableEntry {
                 panic!("Mutation is not allowed on the Unloaded entry")
             }
         }
-    }
-}
-
-impl IndexTable {
-    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        match self.data.binary_search_by_key(&&k[..], |(k, _v)| &k[..]) {
-            Ok(found) => self.data[found] = (k, v),
-            Err(insert) => self.data.insert(insert, (k, v)),
-        }
-    }
-
-    pub fn remove(&mut self, k: &[u8]) -> bool {
-        match self.data.binary_search_by_key(&k, |(k, _v)| &k[..]) {
-            Ok(found) => {
-                self.data.remove(found);
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
-        let pos = self.data.binary_search_by_key(&k, |(k, _v)| &k[..]).ok()?;
-        Some(self.data.get(pos).unwrap().1)
-    }
-
-    pub fn clear(&mut self) {
-        self.data = Vec::new();
     }
 }
 

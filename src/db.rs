@@ -2,8 +2,9 @@ use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::index_table::IndexTable;
 use crate::large_table::{
-    IndexTable, LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
+    LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
 use crate::metrics::Metrics;
 use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalWriter};
