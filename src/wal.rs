@@ -93,6 +93,12 @@ impl WalWriter {
         // and self.frag_size is asserted less than u32::MAX
         Ok(WalPosition(pos))
     }
+
+    /// Current un-initialized position,
+    /// not to be used as WalPosition, only as a metric to see how many bytes were written
+    pub fn position(&self) -> u64 {
+        self.position.position.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone)]

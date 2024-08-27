@@ -13,10 +13,11 @@ use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::fs::{File, OpenOptions};
-use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+use std::{io, thread};
 
 pub struct Db {
     // todo - avoid read lock on reads?
@@ -24,6 +25,7 @@ pub struct Db {
     wal: Arc<Wal>,
     wal_writer: WalWriter,
     control_region_store: Mutex<ControlRegionStore>,
+    config: Arc<Config>,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -51,7 +53,34 @@ impl Db {
             wal_writer,
             wal,
             control_region_store,
+            config,
         })
+    }
+
+    pub fn start_periodic_snapshot(self: &Arc<Self>) {
+        // todo account number of bytes read during wal replay
+        let position = self.wal_writer.position();
+        let weak = Arc::downgrade(self);
+        thread::Builder::new()
+            .name("snapshot".to_string())
+            .spawn(move || Self::periodic_snapshot_thread(weak, position))
+            .unwrap();
+    }
+
+    fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
+        loop {
+            thread::sleep(Duration::from_secs(15));
+            let db = weak.upgrade()?;
+            // todo when we get to wal position wrapping around this will need to be fixed
+            let current_position = db.wal_writer.position();
+            let written = current_position.checked_sub(position).unwrap();
+            if written > db.config.snapshot_written_bytes() {
+                // todo taint db instance on failure?
+                db.rebuild_control_region()
+                    .expect("Failed to rebuild control region");
+                position = current_position;
+            }
+        }
     }
 
     fn read_or_create_control_region(

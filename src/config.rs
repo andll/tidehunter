@@ -8,6 +8,8 @@ pub struct Config {
     max_maps: usize,
     /// Maximum number of loaded entries per LargeTable row
     max_loaded: usize,
+    /// How often to take snapshot depending on the number of entries written to the wal
+    snapshot_written_bytes: u64,
 }
 
 impl Default for Config {
@@ -17,6 +19,7 @@ impl Default for Config {
             large_table_size: 64 * 1024,
             max_maps: 16, // Max 2 Gb mapped space
             max_loaded: 16,
+            snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
         }
     }
 }
@@ -28,6 +31,7 @@ impl Config {
             large_table_size: 1024,
             max_maps: 16,
             max_loaded: 1024,
+            snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb
         }
     }
 
@@ -53,5 +57,9 @@ impl Config {
 
     pub fn max_loaded(&self) -> usize {
         self.max_loaded
+    }
+
+    pub fn snapshot_written_bytes(&self) -> u64 {
+        self.snapshot_written_bytes
     }
 }
