@@ -187,8 +187,8 @@ impl LargeTable {
         let mut data = Vec::with_capacity(self.config.large_table_size());
         let mut last_added_position = None;
         for mutex in self.data.as_ref().as_ref() {
-            let lock = mutex.lock();
-            for entry in lock.data.iter() {
+            let mut lock = mutex.lock();
+            for entry in lock.data.iter_mut() {
                 let snapshot = entry.snapshot();
                 LargeTableSnapshot::update_last_added_position(
                     &mut last_added_position,
@@ -287,13 +287,13 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn snapshot(&self) -> LargeTableSnapshotEntry {
+    pub fn snapshot(&mut self) -> LargeTableSnapshotEntry {
         match self.state {
             LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
             LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Dirty(version) => {
-                LargeTableSnapshotEntry::Dirty(version, self.data.clone())
+                LargeTableSnapshotEntry::Dirty(version, self.data.clone_shared())
             }
         }
     }
