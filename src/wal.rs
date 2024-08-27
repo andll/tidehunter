@@ -215,7 +215,7 @@ impl Wal {
     }
 
     pub fn read_unmapped(&self, pos: WalPosition) -> Result<Bytes, WalError> {
-        const INITIAL_READ_SIZE: usize = 1024;
+        const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
             Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
