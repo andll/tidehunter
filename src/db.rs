@@ -210,6 +210,7 @@ impl Db {
     fn rebuild_control_region(&self) -> DbResult<()> {
         let mut crs = self.control_region_store.lock();
         // drop large_table lock asap
+        // todo (critical) read lock need to cover wal allocation and insert to large table!!
         let snapshot = self.large_table.write().snapshot();
         let last_added_position = snapshot.last_added_position();
         let last_added_position = last_added_position.unwrap_or(WalPosition::INVALID);
