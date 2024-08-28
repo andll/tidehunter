@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::index_table::IndexTable;
 use crate::metrics::Metrics;
+use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
@@ -22,7 +23,7 @@ const LARGE_TABLE_MUTEXES: usize = 1024;
 pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
-    data: IndexTable,
+    data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
 }
@@ -48,7 +49,7 @@ pub(crate) struct LargeTableSnapshot {
 pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
-    Dirty(Version, IndexTable),
+    Dirty(Version, Arc<IndexTable>),
 }
 
 impl LargeTable {
@@ -235,7 +236,7 @@ pub trait Loader {
 impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
-            data: IndexTable::default(),
+            data: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
         }
@@ -243,7 +244,7 @@ impl LargeTableEntry {
 
     pub fn new_empty() -> Self {
         Self {
-            data: IndexTable::default(),
+            data: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Empty,
         }
@@ -259,13 +260,13 @@ impl LargeTableEntry {
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.prepare_for_mutation();
-        self.data.insert(k, v);
+        self.data.make_mut().insert(k, v);
         self.last_added_position = Some(v);
     }
 
     pub fn remove(&mut self, k: &[u8], v: WalPosition) -> bool {
         self.prepare_for_mutation();
-        let result = self.data.remove(k);
+        let result = self.data.make_mut().remove(k);
         self.last_added_position = Some(v);
         result
     }
@@ -282,7 +283,7 @@ impl LargeTableEntry {
             return Ok(());
         };
         let data = loader.load(position)?;
-        self.data = data;
+        self.data = ArcCow::new_owned(data);
         self.state = LargeTableEntryState::Loaded(position);
         Ok(())
     }

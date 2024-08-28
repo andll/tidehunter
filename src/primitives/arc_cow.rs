@@ -13,16 +13,20 @@ pub enum ArcCow<T> {
 }
 
 impl<T: Clone + Default> ArcCow<T> {
-    pub fn clone_shared(&mut self) -> Self {
+    pub fn new_owned(t: T) -> Self {
+        Self::Owned(t)
+    }
+
+    pub fn clone_shared(&mut self) -> Arc<T> {
         let owned = match self {
-            Self::Shared(shared) => return Self::Shared(shared.clone()),
+            Self::Shared(shared) => return shared.clone(),
             Self::Owned(owned) => owned,
         };
         let mut shared = Default::default();
         mem::swap(owned, &mut shared);
         let shared = Arc::new(shared);
         *self = Self::Shared(shared.clone());
-        Self::Shared(shared)
+        shared
     }
 
     pub fn make_mut(&mut self) -> &mut T {
