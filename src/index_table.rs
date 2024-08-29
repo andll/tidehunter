@@ -15,13 +15,23 @@ impl IndexTable {
         }
     }
 
-    pub fn remove(&mut self, k: &[u8]) -> bool {
+    pub fn remove(&mut self, k: &[u8]) {
         match self.data.binary_search_by_key(&k, |(k, _v)| &k[..]) {
             Ok(found) => {
                 self.data.remove(found);
-                true
             }
-            Err(_) => false,
+            Err(_) => {}
+        }
+    }
+
+    pub fn merge_dirty(&mut self, dirty: &Self) {
+        // todo implement this efficiently taking into account both self and dirty are sorted
+        for (k, v) in dirty.data.iter() {
+            if v == &WalPosition::INVALID {
+                self.remove(k);
+            } else {
+                self.insert(k.clone(), *v);
+            }
         }
     }
 

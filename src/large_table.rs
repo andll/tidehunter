@@ -33,7 +33,8 @@ enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
     Loaded(WalPosition),
-    Dirty(Version),
+    DirtyUnloaded(WalPosition, Version),
+    DirtyLoaded(Version),
 }
 
 struct Row {
@@ -50,6 +51,7 @@ pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
     Dirty(Version, Arc<IndexTable>),
+    DirtyUnloaded(WalPosition, Version, Arc<IndexTable>),
 }
 
 impl LargeTable {
@@ -121,8 +123,8 @@ impl LargeTable {
         }
     }
 
-    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
-        let mut entry = self.load_entry(&k, loader)?;
+    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
+        let mut entry = self.entry(&k);
         entry.insert(k, v);
         let index_size = entry.data.len();
         self.metrics
@@ -138,33 +140,35 @@ impl LargeTable {
         Ok(())
     }
 
-    pub fn remove<L: Loader>(
-        &self,
-        k: &[u8],
-        v: WalPosition,
-        loader: &L,
-    ) -> Result<bool, L::Error> {
-        let mut entry = self.load_entry(k, loader)?;
+    pub fn remove<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
+        let mut entry = self.entry(&k);
         Ok(entry.remove(k, v))
     }
 
     pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
-        let entry = self.load_entry(k, loader)?;
+        let (row, offset) = self.row(k);
+        let entry = row.entry(offset);
+        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
+            // optimization: in dirty unloaded state we might not need to load entry
+            if let Some(found) = entry.get(k) {
+                return Ok(found.valid());
+            }
+        }
+        let entry = self.load_entry(row, offset, loader)?;
         Ok(entry.get(k))
     }
 
-    fn load_entry<L: Loader>(
+    fn entry(&self, k: &[u8]) -> MappedMutexGuard<'_, LargeTableEntry> {
+        let (row, offset) = self.row(k);
+        MutexGuard::map(row, |l| l.entry_mut(offset))
+    }
+
+    fn load_entry<'a, L: Loader>(
         &self,
-        k: &[u8],
+        mut row: MutexGuard<'a, Row>,
+        offset: usize,
         loader: &L,
-    ) -> Result<MappedMutexGuard<'_, LargeTableEntry>, L::Error> {
-        assert!(k.len() >= 4);
-        let mut p = [0u8; 4];
-        p.copy_from_slice(&k[..4]);
-        let pos = u32::from_le_bytes(p) as usize;
-        let pos = pos % self.config.large_table_size();
-        let (mutex, offset) = Self::locate(pos);
-        let mut row = self.data.lock(mutex);
+    ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
         row.lru.insert(offset as u64);
         if loader.unload_supported() && row.lru.len() > self.config.max_loaded() {
             // todo - try to unload Loaded entry even if unload is not supported
@@ -177,9 +181,20 @@ impl LargeTable {
             // for example prioritize unloading Loaded entries over Dirty entries
             row.data[unload as usize].unload(loader)?;
         }
-        let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
+        let mut entry = MutexGuard::map(row, |l| l.entry_mut(offset));
         entry.maybe_load(loader)?;
         Ok(entry)
+    }
+
+    fn row(&self, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
+        assert!(k.len() >= 4);
+        let mut p = [0u8; 4];
+        p.copy_from_slice(&k[..4]);
+        let pos = u32::from_le_bytes(p) as usize;
+        let pos = pos % self.config.large_table_size();
+        let (mutex, offset) = Self::locate(pos);
+        let row = self.data.lock(mutex);
+        (row, offset)
     }
 
     /// Provides a snapshot of this large table.
@@ -212,7 +227,7 @@ impl LargeTable {
             let (mutex, offset) = Self::locate(index);
             let mut lock = self.data.lock(mutex);
             let entry = &mut lock.data[offset];
-            entry.maybe_set_to_loaded(version, position);
+            entry.maybe_set_to_clean(version, position);
         }
     }
 
@@ -220,6 +235,15 @@ impl LargeTable {
         let mutex = pos % LARGE_TABLE_MUTEXES;
         let offset = pos / LARGE_TABLE_MUTEXES;
         (mutex, offset)
+    }
+}
+
+impl Row {
+    pub fn entry(&self, offset: usize) -> &LargeTableEntry {
+        &self.data[offset]
+    }
+    pub fn entry_mut(&mut self, offset: usize) -> &mut LargeTableEntry {
+        &mut self.data[offset]
     }
 }
 
@@ -264,11 +288,13 @@ impl LargeTableEntry {
         self.last_added_position = Some(v);
     }
 
-    pub fn remove(&mut self, k: &[u8], v: WalPosition) -> bool {
-        self.prepare_for_mutation();
-        let result = self.data.make_mut().remove(k);
+    pub fn remove(&mut self, k: Bytes, v: WalPosition) {
+        let dirty_state = self.prepare_for_mutation();
+        match dirty_state {
+            DirtyState::Loaded => self.data.make_mut().remove(&k),
+            DirtyState::Unloaded => self.data.make_mut().insert(k, WalPosition::INVALID),
+        }
         self.last_added_position = Some(v);
-        result
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -279,10 +305,14 @@ impl LargeTableEntry {
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
-        let LargeTableEntryState::Unloaded(position) = self.state else {
+        let Some((state, position)) = self.unloaded_state() else {
             return Ok(());
         };
-        let data = loader.load(position)?;
+        let mut data = loader.load(position)?;
+        match state {
+            UnloadedState::Dirty => data.merge_dirty(&self.data),
+            UnloadedState::Clean => {}
+        };
         self.data = ArcCow::new_owned(data);
         self.state = LargeTableEntryState::Loaded(position);
         Ok(())
@@ -293,15 +323,26 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
             LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
-            LargeTableEntryState::Dirty(version) => {
+            LargeTableEntryState::DirtyLoaded(version) => {
                 LargeTableSnapshotEntry::Dirty(version, self.data.clone_shared())
+            }
+            LargeTableEntryState::DirtyUnloaded(pos, version) => {
+                LargeTableSnapshotEntry::DirtyUnloaded(pos, version, self.data.clone_shared())
             }
         }
     }
 
-    pub fn maybe_set_to_loaded(&mut self, version: Version, position: WalPosition) {
-        if self.state == LargeTableEntryState::Dirty(version) {
+    /// Updates dirty state to clean state if entry was not updated since the snapshot was taken
+    pub fn maybe_set_to_clean(&mut self, version: Version, position: WalPosition) {
+        // todo use Arc pointer comparison instead of version
+        if self.state == LargeTableEntryState::DirtyLoaded(version) {
             self.state = LargeTableEntryState::Loaded(position)
+        } else if matches!(
+            self.state,
+            LargeTableEntryState::DirtyUnloaded(_, v) if v == version
+        ) {
+            self.data = Default::default();
+            self.state = LargeTableEntryState::Unloaded(position)
         }
     }
 
@@ -318,18 +359,53 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    fn prepare_for_mutation(&mut self) {
+    fn prepare_for_mutation(&mut self) -> DirtyState {
         match &mut self.state {
-            LargeTableEntryState::Empty => self.state = LargeTableEntryState::Dirty(Version::ZERO),
+            LargeTableEntryState::Empty => {
+                self.state = LargeTableEntryState::DirtyLoaded(Version::ZERO)
+            }
             LargeTableEntryState::Loaded(_) => {
-                self.state = LargeTableEntryState::Dirty(Version::ZERO)
+                self.state = LargeTableEntryState::DirtyLoaded(Version::ZERO)
             }
-            LargeTableEntryState::Dirty(version) => version.wrapping_increment(),
-            LargeTableEntryState::Unloaded(_) => {
-                panic!("Mutation is not allowed on the Unloaded entry")
+            LargeTableEntryState::DirtyLoaded(version) => version.wrapping_increment(),
+            LargeTableEntryState::Unloaded(pos) => {
+                self.state = LargeTableEntryState::DirtyUnloaded(*pos, Version::ZERO)
             }
+            LargeTableEntryState::DirtyUnloaded(_, version) => version.wrapping_increment(),
+        }
+        self.dirty_state()
+            .expect("prepare_for_mutation sets state to one of dirty states")
+    }
+
+    fn dirty_state(&self) -> Option<DirtyState> {
+        match self.state {
+            LargeTableEntryState::Empty => None,
+            LargeTableEntryState::Unloaded(_) => None,
+            LargeTableEntryState::Loaded(_) => None,
+            LargeTableEntryState::DirtyUnloaded(_, _) => Some(DirtyState::Unloaded),
+            LargeTableEntryState::DirtyLoaded(_) => Some(DirtyState::Loaded),
         }
     }
+
+    fn unloaded_state(&self) -> Option<(UnloadedState, WalPosition)> {
+        match self.state {
+            LargeTableEntryState::Empty => None,
+            LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, pos)),
+            LargeTableEntryState::Loaded(_) => None,
+            LargeTableEntryState::DirtyUnloaded(pos, _) => Some((UnloadedState::Dirty, pos)),
+            LargeTableEntryState::DirtyLoaded(_) => None,
+        }
+    }
+}
+
+enum DirtyState {
+    Loaded,
+    Unloaded,
+}
+
+enum UnloadedState {
+    Dirty,
+    Clean,
 }
 
 impl LargeTableSnapshot {

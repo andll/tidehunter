@@ -147,12 +147,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn remove(&self, k: impl Into<Bytes>) -> DbResult<bool> {
+    pub fn remove(&self, k: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Remove(k.clone()));
         let position = self.wal_writer.write(&w)?;
-        Ok(self.large_table.read().remove(&k, position, self)?)
+        Ok(self.large_table.read().remove(k, position, self)?)
     }
 
     pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -201,7 +201,7 @@ impl Db {
                 }
                 WalEntry::Remove(k) => {
                     metrics.replayed_wal_records.fetch_add(1, Ordering::Relaxed);
-                    large_table.remove(&k, position, wal_iterator.wal())?;
+                    large_table.remove(k, position, wal_iterator.wal())?;
                 }
             }
         }
@@ -228,6 +228,13 @@ impl Db {
                 LargeTableSnapshotEntry::Empty => Ok(WalPosition::INVALID),
                 LargeTableSnapshotEntry::Clean(pos) => Ok(pos),
                 LargeTableSnapshotEntry::Dirty(version, index) => {
+                    let position = self.write_index(&index)?;
+                    index_updates.push((i, version, position));
+                    Ok(position)
+                }
+                LargeTableSnapshotEntry::DirtyUnloaded(pos, version, index) => {
+                    let mut clean = self.load(pos)?;
+                    clean.merge_dirty(&index);
                     let position = self.write_index(&index)?;
                     index_updates.push((i, version, position));
                     Ok(position)
@@ -481,9 +488,9 @@ mod test {
             db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
-            assert!(db.remove(vec![1, 2, 3, 4]).unwrap());
+            db.remove(vec![1, 2, 3, 4]).unwrap();
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
-            assert!(!db.remove(vec![1, 2, 3, 4]).unwrap());
+            db.remove(vec![1, 2, 3, 4]).unwrap();
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
         }
         {
@@ -493,7 +500,7 @@ mod test {
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
             assert_eq!(Some(vec![9, 10].into()), db.get(&[1, 2, 3, 4]).unwrap());
             db.rebuild_control_region().unwrap();
-            assert!(db.remove(vec![1, 2, 3, 4]).unwrap());
+            db.remove(vec![1, 2, 3, 4]).unwrap();
         }
         {
             let metrics = Metrics::new();
