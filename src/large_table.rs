@@ -28,7 +28,6 @@ pub struct LargeTableEntry {
     state: LargeTableEntryState,
 }
 
-#[derive(PartialEq)]
 enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
