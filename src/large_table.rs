@@ -119,7 +119,8 @@ impl LargeTable {
     }
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
-        let mut entry = self.entry(&k);
+        let (mut row, offset) = self.row(&k);
+        let mut entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
         self.metrics
@@ -136,7 +137,8 @@ impl LargeTable {
     }
 
     pub fn remove<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
-        let mut entry = self.entry(&k);
+        let (mut row, offset) = self.row(&k);
+        let mut entry = row.entry_mut(offset);
         Ok(entry.remove(k, v))
     }
 
@@ -151,11 +153,6 @@ impl LargeTable {
         }
         let entry = self.load_entry(row, offset, loader)?;
         Ok(entry.get(k))
-    }
-
-    fn entry(&self, k: &[u8]) -> MappedMutexGuard<'_, LargeTableEntry> {
-        let (row, offset) = self.row(k);
-        MutexGuard::map(row, |l| l.entry_mut(offset))
     }
 
     fn load_entry<'a, L: Loader>(
