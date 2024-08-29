@@ -40,10 +40,6 @@ impl IndexTable {
         Some(self.data.get(pos).unwrap().1)
     }
 
-    pub fn clear(&mut self) {
-        self.data = Default::default();
-    }
-
     pub fn len(&self) -> usize {
         self.data.len()
     }

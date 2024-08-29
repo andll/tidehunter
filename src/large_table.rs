@@ -8,7 +8,6 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use std::collections::HashSet;
-use std::iter::repeat_with;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -57,11 +56,6 @@ pub(crate) enum LargeTableSnapshotEntry {
 }
 
 impl LargeTable {
-    pub fn new(config: Arc<Config>, metrics: Arc<Metrics>) -> Self {
-        let it = repeat_with(|| LargeTableEntry::new_empty()).take(config.large_table_size());
-        Self::from_iterator_size(it, config, metrics)
-    }
-
     pub fn from_unloaded(
         snapshot: &[WalPosition],
         config: Arc<Config>,

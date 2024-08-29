@@ -77,10 +77,6 @@ impl ControlRegion {
         self.last_position
     }
 
-    pub fn len_bytes(&self) -> usize {
-        IntoBytesFixed::len(self)
-    }
-
     pub fn len_bytes_from_large_table_size(large_table_size: usize) -> usize {
         Version::LENGTH + WalPosition::LENGTH + large_table_size * WalPosition::LENGTH
     }
