@@ -289,7 +289,7 @@ impl LargeTableEntry {
             DirtyState::Loaded(dirty_keys) => {
                 self.data.make_mut().remove(&k);
                 dirty_keys.insert(k);
-            },
+            }
             DirtyState::Unloaded(dirty_keys) => {
                 // We could just use dirty_keys and not use WalPosition::INVALID as a marker.
                 // In that case, however, we would need to clone and pass dirty_keys to a snapshot.
@@ -352,6 +352,21 @@ impl LargeTableEntry {
     }
 
     pub fn unload<L: Loader>(&mut self, _loader: &L) -> Result<(), L::Error> {
+        match &self.state {
+            LargeTableEntryState::Empty => {}
+            LargeTableEntryState::Unloaded(_) => {}
+            LargeTableEntryState::Loaded(pos) => {
+                self.state = LargeTableEntryState::Unloaded(*pos);
+                self.data = Default::default();
+            }
+            LargeTableEntryState::DirtyUnloaded(_pos, _dirty_keys) => {
+                // load, merge, flush and unload -> Unloaded(..)
+            }
+            LargeTableEntryState::DirtyLoaded(_dirty_key) => {
+                // either (a) flush and unload -> Unloaded(..)
+                // or     (b) unmerge and unload -> DirtyUnloaded(..)
+            }
+        }
         // if let LargeTableEntryState::Loaded(position) = self.state {
         //     self.state = LargeTableEntryState::Unloaded(position);
         //     self.data.clear();
@@ -368,15 +383,20 @@ impl LargeTableEntry {
 impl LargeTableEntryState {
     pub fn mark_dirty(&mut self) -> DirtyState {
         match self {
-            LargeTableEntryState::Empty => *self = LargeTableEntryState::DirtyLoaded(Default::default()),
-            LargeTableEntryState::Loaded(_) => *self = LargeTableEntryState::DirtyLoaded(Default::default()),
+            LargeTableEntryState::Empty => {
+                *self = LargeTableEntryState::DirtyLoaded(Default::default())
+            }
+            LargeTableEntryState::Loaded(_) => {
+                *self = LargeTableEntryState::DirtyLoaded(Default::default())
+            }
             LargeTableEntryState::DirtyLoaded(_) => {}
             LargeTableEntryState::Unloaded(pos) => {
                 *self = LargeTableEntryState::DirtyUnloaded(*pos, HashSet::default())
             }
             LargeTableEntryState::DirtyUnloaded(_, _) => {}
         }
-        self.as_dirty_state().expect("mark_dirty sets state to one of dirty states")
+        self.as_dirty_state()
+            .expect("mark_dirty sets state to one of dirty states")
     }
 
     pub fn as_dirty_state(&mut self) -> Option<DirtyState> {
