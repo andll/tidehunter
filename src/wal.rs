@@ -214,6 +214,7 @@ impl Wal {
     }
 
     pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
+        assert_ne!(pos, WalPosition::INVALID, "Trying to read invalid wal position");
         let (map, offset) = self.layout.locate(pos.0);
         let map = self.map(map, false)?;
         // todo avoid clone, introduce Bytes::slice_in_place
@@ -221,6 +222,7 @@ impl Wal {
     }
 
     pub fn read_unmapped(&self, pos: WalPosition) -> Result<Bytes, WalError> {
+        assert_ne!(pos, WalPosition::INVALID, "Trying to read invalid wal position");
         const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
