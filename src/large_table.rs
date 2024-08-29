@@ -7,6 +7,7 @@ use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
+use std::collections::HashSet;
 use std::iter::repeat_with;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ const LARGE_TABLE_MUTEXES: usize = 1024;
 pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
+    dirty_keys: HashSet<Bytes>,
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
@@ -261,6 +263,7 @@ impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
             data: Default::default(),
+            dirty_keys: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
         }
@@ -269,6 +272,7 @@ impl LargeTableEntry {
     pub fn new_empty() -> Self {
         Self {
             data: Default::default(),
+            dirty_keys: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Empty,
         }
@@ -284,6 +288,9 @@ impl LargeTableEntry {
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.prepare_for_mutation();
+        if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
+            self.dirty_keys.insert(k.clone());
+        }
         self.data.make_mut().insert(k, v);
         self.last_added_position = Some(v);
     }
@@ -292,7 +299,10 @@ impl LargeTableEntry {
         let dirty_state = self.prepare_for_mutation();
         match dirty_state {
             DirtyState::Loaded => self.data.make_mut().remove(&k),
-            DirtyState::Unloaded => self.data.make_mut().insert(k, WalPosition::INVALID),
+            DirtyState::Unloaded => {
+                self.dirty_keys.insert(k.clone());
+                self.data.make_mut().insert(k, WalPosition::INVALID)
+            }
         }
         self.last_added_position = Some(v);
     }
@@ -341,6 +351,7 @@ impl LargeTableEntry {
             self.state,
             LargeTableEntryState::DirtyUnloaded(_, v) if v == version
         ) {
+            self.dirty_keys = Default::default();
             self.data = Default::default();
             self.state = LargeTableEntryState::Unloaded(position)
         }
