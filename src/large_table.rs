@@ -277,10 +277,8 @@ impl LargeTableEntry {
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        self.state.mark_dirty();
-        if let Some(dirty_keys) = self.state.dirty_keys() {
-            dirty_keys.insert(k.clone());
-        }
+        let dirty_state = self.state.mark_dirty();
+        dirty_state.into_dirty_keys().insert(k.clone());
         self.data.make_mut().insert(k, v);
         self.last_added_position = Some(v);
     }
@@ -293,6 +291,8 @@ impl LargeTableEntry {
                 dirty_keys.insert(k);
             },
             DirtyState::Unloaded(dirty_keys) => {
+                // We could just use dirty_keys and not use WalPosition::INVALID as a marker.
+                // In that case, however, we would need to clone and pass dirty_keys to a snapshot.
                 self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
                 dirty_keys.insert(k);
             }
@@ -402,10 +402,16 @@ impl LargeTableEntryState {
     }
 
     pub fn dirty_keys(&mut self) -> Option<&mut HashSet<Bytes>> {
-        Some(match self.as_dirty_state()? {
+        Some(self.as_dirty_state()?.into_dirty_keys())
+    }
+}
+
+impl<'a> DirtyState<'a> {
+    pub fn into_dirty_keys(self) -> &'a mut HashSet<Bytes> {
+        match self {
             DirtyState::Loaded(dirty_keys) => dirty_keys,
             DirtyState::Unloaded(dirty_keys) => dirty_keys,
-        })
+        }
     }
 }
 
