@@ -339,6 +339,8 @@ impl LargeTableEntry {
             // DirtyLoaded changes to Loaded
             Some(DirtyState::Loaded(_)) => self.state = LargeTableEntryState::Loaded(position),
             // DirtyUnloaded changes to Unloaded, data is purged
+            // We can also change it to Loaded,
+            // if we send merged Index from the snapshot
             Some(DirtyState::Unloaded(_)) => {
                 self.data = Default::default();
                 self.state = LargeTableEntryState::Unloaded(position)

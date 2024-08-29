@@ -235,7 +235,7 @@ impl Db {
                 LargeTableSnapshotEntry::DirtyUnloaded(pos, index) => {
                     let mut clean = self.load(pos)?;
                     clean.merge_dirty(&index);
-                    let position = self.write_index(&index)?;
+                    let position = self.write_index(&clean)?;
                     index_updates.push((i, index, position));
                     Ok(position)
                 }
