@@ -34,8 +34,8 @@ enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
     Loaded(WalPosition),
-    DirtyUnloaded(WalPosition, Version),
-    DirtyLoaded(Version),
+    DirtyUnloaded(WalPosition),
+    DirtyLoaded,
 }
 
 struct Row {
@@ -51,8 +51,8 @@ pub(crate) struct LargeTableSnapshot {
 pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
-    Dirty(Version, Arc<IndexTable>),
-    DirtyUnloaded(WalPosition, Version, Arc<IndexTable>),
+    Dirty(Arc<IndexTable>),
+    DirtyUnloaded(WalPosition, Arc<IndexTable>),
 }
 
 impl LargeTable {
@@ -144,7 +144,7 @@ impl LargeTable {
     pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
         let (row, offset) = self.row(k);
         let entry = row.entry(offset);
-        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
+        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_)) {
             // optimization: in dirty unloaded state we might not need to load entry
             if let Some(found) = entry.get(k) {
                 return Ok(found.valid());
@@ -217,13 +217,13 @@ impl LargeTable {
     }
 
     /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken.
-    pub fn maybe_update_entries(&self, updates: Vec<(usize, Version, WalPosition)>) {
+    pub fn maybe_update_entries(&self, updates: Vec<(usize, Arc<IndexTable>, WalPosition)>) {
         // todo - it is possible to optimize this to minimize number of mutex locks
-        for (index, version, position) in updates {
+        for (index, data, position) in updates {
             let (mutex, offset) = Self::locate(index);
             let mut lock = self.data.lock(mutex);
             let entry = &mut lock.data[offset];
-            entry.maybe_set_to_clean(version, position);
+            entry.maybe_set_to_clean(&data, position);
         }
     }
 
@@ -282,7 +282,7 @@ impl LargeTableEntry {
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.prepare_for_mutation();
-        if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
+        if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_)) {
             self.dirty_keys.insert(k.clone());
         }
         self.data.make_mut().insert(k, v);
@@ -327,24 +327,24 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
             LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
-            LargeTableEntryState::DirtyLoaded(version) => {
-                LargeTableSnapshotEntry::Dirty(version, self.data.clone_shared())
+            LargeTableEntryState::DirtyLoaded => {
+                LargeTableSnapshotEntry::Dirty(self.data.clone_shared())
             }
-            LargeTableEntryState::DirtyUnloaded(pos, version) => {
-                LargeTableSnapshotEntry::DirtyUnloaded(pos, version, self.data.clone_shared())
+            LargeTableEntryState::DirtyUnloaded(pos) => {
+                LargeTableSnapshotEntry::DirtyUnloaded(pos, self.data.clone_shared())
             }
         }
     }
 
     /// Updates dirty state to clean state if entry was not updated since the snapshot was taken
-    pub fn maybe_set_to_clean(&mut self, version: Version, position: WalPosition) {
-        // todo use Arc pointer comparison instead of version
-        if self.state == LargeTableEntryState::DirtyLoaded(version) {
+    pub fn maybe_set_to_clean(&mut self, expected: &Arc<IndexTable>, position: WalPosition) {
+        if !self.data.same_shared(expected) {
+            // The entry has changed since the snapshot was taken
+            return;
+        }
+        if self.state == LargeTableEntryState::DirtyLoaded {
             self.state = LargeTableEntryState::Loaded(position)
-        } else if matches!(
-            self.state,
-            LargeTableEntryState::DirtyUnloaded(_, v) if v == version
-        ) {
+        } else if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_)) {
             self.dirty_keys = Default::default();
             self.data = Default::default();
             self.state = LargeTableEntryState::Unloaded(position)
@@ -366,17 +366,13 @@ impl LargeTableEntry {
 
     fn prepare_for_mutation(&mut self) -> DirtyState {
         match &mut self.state {
-            LargeTableEntryState::Empty => {
-                self.state = LargeTableEntryState::DirtyLoaded(Version::ZERO)
-            }
-            LargeTableEntryState::Loaded(_) => {
-                self.state = LargeTableEntryState::DirtyLoaded(Version::ZERO)
-            }
-            LargeTableEntryState::DirtyLoaded(version) => version.wrapping_increment(),
+            LargeTableEntryState::Empty => self.state = LargeTableEntryState::DirtyLoaded,
+            LargeTableEntryState::Loaded(_) => self.state = LargeTableEntryState::DirtyLoaded,
+            LargeTableEntryState::DirtyLoaded => {}
             LargeTableEntryState::Unloaded(pos) => {
-                self.state = LargeTableEntryState::DirtyUnloaded(*pos, Version::ZERO)
+                self.state = LargeTableEntryState::DirtyUnloaded(*pos)
             }
-            LargeTableEntryState::DirtyUnloaded(_, version) => version.wrapping_increment(),
+            LargeTableEntryState::DirtyUnloaded(_) => {}
         }
         self.dirty_state()
             .expect("prepare_for_mutation sets state to one of dirty states")
@@ -387,8 +383,8 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(_) => None,
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(_, _) => Some(DirtyState::Unloaded),
-            LargeTableEntryState::DirtyLoaded(_) => Some(DirtyState::Loaded),
+            LargeTableEntryState::DirtyUnloaded(_) => Some(DirtyState::Unloaded),
+            LargeTableEntryState::DirtyLoaded => Some(DirtyState::Loaded),
         }
     }
 
@@ -397,8 +393,8 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, pos)),
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(pos, _) => Some((UnloadedState::Dirty, pos)),
-            LargeTableEntryState::DirtyLoaded(_) => None,
+            LargeTableEntryState::DirtyUnloaded(pos) => Some((UnloadedState::Dirty, pos)),
+            LargeTableEntryState::DirtyLoaded => None,
         }
     }
 }
@@ -439,10 +435,6 @@ impl LargeTableSnapshot {
 impl Version {
     pub const ZERO: Version = Version(0);
     pub const LENGTH: usize = 8;
-
-    pub fn wrapping_increment(&mut self) {
-        self.0 = self.0.wrapping_add(1);
-    }
 
     pub fn checked_increment(&mut self) {
         self.0 = self

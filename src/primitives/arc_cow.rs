@@ -29,6 +29,13 @@ impl<T: Clone + Default> ArcCow<T> {
         shared
     }
 
+    pub fn same_shared(&self, other: &Arc<T>) -> bool {
+        match self {
+            ArcCow::Owned(_) => false,
+            ArcCow::Shared(shared) => Arc::ptr_eq(shared, other),
+        }
+    }
+
     pub fn make_mut(&mut self) -> &mut T {
         let shared = match self {
             Self::Owned(owned) => return owned,

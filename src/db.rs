@@ -227,16 +227,16 @@ impl Db {
             .map(|(i, entry)| match entry {
                 LargeTableSnapshotEntry::Empty => Ok(WalPosition::INVALID),
                 LargeTableSnapshotEntry::Clean(pos) => Ok(pos),
-                LargeTableSnapshotEntry::Dirty(version, index) => {
+                LargeTableSnapshotEntry::Dirty(index) => {
                     let position = self.write_index(&index)?;
-                    index_updates.push((i, version, position));
+                    index_updates.push((i, index, position));
                     Ok(position)
                 }
-                LargeTableSnapshotEntry::DirtyUnloaded(pos, version, index) => {
+                LargeTableSnapshotEntry::DirtyUnloaded(pos, index) => {
                     let mut clean = self.load(pos)?;
                     clean.merge_dirty(&index);
                     let position = self.write_index(&index)?;
-                    index_updates.push((i, version, position));
+                    index_updates.push((i, index, position));
                     Ok(position)
                 }
             })
