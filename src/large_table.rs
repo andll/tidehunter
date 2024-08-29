@@ -336,7 +336,9 @@ impl LargeTableEntry {
         }
         match self.state.as_dirty_state() {
             None => {}
+            // DirtyLoaded changes to Loaded
             Some(DirtyState::Loaded(_)) => self.state = LargeTableEntryState::Loaded(position),
+            // DirtyUnloaded changes to Unloaded, data is purged
             Some(DirtyState::Unloaded(_)) => {
                 self.data = Default::default();
                 self.state = LargeTableEntryState::Unloaded(position)
