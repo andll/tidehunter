@@ -23,7 +23,6 @@ const LARGE_TABLE_MUTEXES: usize = 1024;
 pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
-    dirty_keys: HashSet<Bytes>,
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
@@ -34,7 +33,7 @@ enum LargeTableEntryState {
     Empty,
     Unloaded(WalPosition),
     Loaded(WalPosition),
-    DirtyUnloaded(WalPosition),
+    DirtyUnloaded(WalPosition, HashSet<Bytes>),
     DirtyLoaded,
 }
 
@@ -144,7 +143,7 @@ impl LargeTable {
     pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
         let (row, offset) = self.row(k);
         let entry = row.entry(offset);
-        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_)) {
+        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
             // optimization: in dirty unloaded state we might not need to load entry
             if let Some(found) = entry.get(k) {
                 return Ok(found.valid());
@@ -257,7 +256,6 @@ impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
             data: Default::default(),
-            dirty_keys: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
         }
@@ -266,7 +264,6 @@ impl LargeTableEntry {
     pub fn new_empty() -> Self {
         Self {
             data: Default::default(),
-            dirty_keys: Default::default(),
             last_added_position: None,
             state: LargeTableEntryState::Empty,
         }
@@ -282,8 +279,8 @@ impl LargeTableEntry {
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         self.prepare_for_mutation();
-        if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_)) {
-            self.dirty_keys.insert(k.clone());
+        if let LargeTableEntryState::DirtyUnloaded(_, dirty_keys) = &mut self.state {
+            dirty_keys.insert(k.clone());
         }
         self.data.make_mut().insert(k, v);
         self.last_added_position = Some(v);
@@ -293,8 +290,8 @@ impl LargeTableEntry {
         let dirty_state = self.prepare_for_mutation();
         match dirty_state {
             DirtyState::Loaded => self.data.make_mut().remove(&k),
-            DirtyState::Unloaded => {
-                self.dirty_keys.insert(k.clone());
+            DirtyState::Unloaded(dirty_keys) => {
+                dirty_keys.insert(k.clone());
                 self.data.make_mut().insert(k, WalPosition::INVALID)
             }
         }
@@ -330,7 +327,7 @@ impl LargeTableEntry {
             LargeTableEntryState::DirtyLoaded => {
                 LargeTableSnapshotEntry::Dirty(self.data.clone_shared())
             }
-            LargeTableEntryState::DirtyUnloaded(pos) => {
+            LargeTableEntryState::DirtyUnloaded(pos, _) => {
                 LargeTableSnapshotEntry::DirtyUnloaded(pos, self.data.clone_shared())
             }
         }
@@ -342,12 +339,13 @@ impl LargeTableEntry {
             // The entry has changed since the snapshot was taken
             return;
         }
-        if self.state == LargeTableEntryState::DirtyLoaded {
-            self.state = LargeTableEntryState::Loaded(position)
-        } else if matches!(self.state, LargeTableEntryState::DirtyUnloaded(_)) {
-            self.dirty_keys = Default::default();
-            self.data = Default::default();
-            self.state = LargeTableEntryState::Unloaded(position)
+        match self.dirty_state() {
+            None => {}
+            Some(DirtyState::Loaded) => self.state = LargeTableEntryState::Loaded(position),
+            Some(DirtyState::Unloaded(_)) => {
+                self.data = Default::default();
+                self.state = LargeTableEntryState::Unloaded(position)
+            }
         }
     }
 
@@ -370,20 +368,22 @@ impl LargeTableEntry {
             LargeTableEntryState::Loaded(_) => self.state = LargeTableEntryState::DirtyLoaded,
             LargeTableEntryState::DirtyLoaded => {}
             LargeTableEntryState::Unloaded(pos) => {
-                self.state = LargeTableEntryState::DirtyUnloaded(*pos)
+                self.state = LargeTableEntryState::DirtyUnloaded(*pos, HashSet::default())
             }
-            LargeTableEntryState::DirtyUnloaded(_) => {}
+            LargeTableEntryState::DirtyUnloaded(_, _) => {}
         }
         self.dirty_state()
             .expect("prepare_for_mutation sets state to one of dirty states")
     }
 
-    fn dirty_state(&self) -> Option<DirtyState> {
-        match self.state {
+    fn dirty_state(&mut self) -> Option<DirtyState> {
+        match &mut self.state {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(_) => None,
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(_) => Some(DirtyState::Unloaded),
+            LargeTableEntryState::DirtyUnloaded(_, dirty_keys) => {
+                Some(DirtyState::Unloaded(dirty_keys))
+            }
             LargeTableEntryState::DirtyLoaded => Some(DirtyState::Loaded),
         }
     }
@@ -393,15 +393,15 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, pos)),
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(pos) => Some((UnloadedState::Dirty, pos)),
+            LargeTableEntryState::DirtyUnloaded(pos, _) => Some((UnloadedState::Dirty, pos)),
             LargeTableEntryState::DirtyLoaded => None,
         }
     }
 }
 
-enum DirtyState {
+enum DirtyState<'a> {
     Loaded,
-    Unloaded,
+    Unloaded(&'a mut HashSet<Bytes>),
 }
 
 enum UnloadedState {
