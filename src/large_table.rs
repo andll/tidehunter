@@ -22,6 +22,7 @@ const LARGE_TABLE_MUTEXES: usize = 1024;
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
 
+#[derive(Default)]
 pub struct LargeTableEntry {
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
@@ -254,18 +255,13 @@ pub trait Loader {
 impl LargeTableEntry {
     pub fn new_unloaded(position: WalPosition) -> Self {
         Self {
-            data: Default::default(),
-            last_added_position: None,
             state: LargeTableEntryState::Unloaded(position),
+            ..Default::default()
         }
     }
 
     pub fn new_empty() -> Self {
-        Self {
-            data: Default::default(),
-            last_added_position: None,
-            state: LargeTableEntryState::Empty,
-        }
+        Self::default()
     }
 
     pub fn from_snapshot_position(position: &WalPosition) -> Self {
@@ -477,5 +473,11 @@ impl Version {
             .0
             .checked_add(1)
             .expect("Can not increment id: too large");
+    }
+}
+
+impl Default for LargeTableEntryState {
+    fn default() -> Self {
+        Self::Empty
     }
 }
