@@ -33,7 +33,7 @@ enum LargeTableEntryState {
     Unloaded(WalPosition),
     Loaded(WalPosition),
     DirtyUnloaded(WalPosition, HashSet<Bytes>),
-    DirtyLoaded,
+    DirtyLoaded(HashSet<Bytes>),
 }
 
 struct Row {
@@ -277,8 +277,8 @@ impl LargeTableEntry {
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        self.prepare_for_mutation();
-        if let LargeTableEntryState::DirtyUnloaded(_, dirty_keys) = &mut self.state {
+        self.state.mark_dirty();
+        if let Some(dirty_keys) = self.state.dirty_keys() {
             dirty_keys.insert(k.clone());
         }
         self.data.make_mut().insert(k, v);
@@ -286,12 +286,15 @@ impl LargeTableEntry {
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
-        let dirty_state = self.prepare_for_mutation();
+        let dirty_state = self.state.mark_dirty();
         match dirty_state {
-            DirtyState::Loaded => self.data.make_mut().remove(&k),
+            DirtyState::Loaded(dirty_keys) => {
+                self.data.make_mut().remove(&k);
+                dirty_keys.insert(k);
+            },
             DirtyState::Unloaded(dirty_keys) => {
-                dirty_keys.insert(k.clone());
-                self.data.make_mut().insert(k, WalPosition::INVALID)
+                self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
+                dirty_keys.insert(k);
             }
         }
         self.last_added_position = Some(v);
@@ -305,7 +308,7 @@ impl LargeTableEntry {
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
-        let Some((state, position)) = self.unloaded_state() else {
+        let Some((state, position)) = self.state.as_unloaded_state() else {
             return Ok(());
         };
         let mut data = loader.load(position)?;
@@ -323,7 +326,7 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
             LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
-            LargeTableEntryState::DirtyLoaded => {
+            LargeTableEntryState::DirtyLoaded(_) => {
                 LargeTableSnapshotEntry::Dirty(self.data.clone_shared())
             }
             LargeTableEntryState::DirtyUnloaded(pos, _) => {
@@ -338,9 +341,9 @@ impl LargeTableEntry {
             // The entry has changed since the snapshot was taken
             return;
         }
-        match self.dirty_state() {
+        match self.state.as_dirty_state() {
             None => {}
-            Some(DirtyState::Loaded) => self.state = LargeTableEntryState::Loaded(position),
+            Some(DirtyState::Loaded(_)) => self.state = LargeTableEntryState::Loaded(position),
             Some(DirtyState::Unloaded(_)) => {
                 self.data = Default::default();
                 self.state = LargeTableEntryState::Unloaded(position)
@@ -360,46 +363,54 @@ impl LargeTableEntry {
         // }
         Ok(())
     }
+}
 
-    fn prepare_for_mutation(&mut self) -> DirtyState {
-        match &mut self.state {
-            LargeTableEntryState::Empty => self.state = LargeTableEntryState::DirtyLoaded,
-            LargeTableEntryState::Loaded(_) => self.state = LargeTableEntryState::DirtyLoaded,
-            LargeTableEntryState::DirtyLoaded => {}
+impl LargeTableEntryState {
+    pub fn mark_dirty(&mut self) -> DirtyState {
+        match self {
+            LargeTableEntryState::Empty => *self = LargeTableEntryState::DirtyLoaded(Default::default()),
+            LargeTableEntryState::Loaded(_) => *self = LargeTableEntryState::DirtyLoaded(Default::default()),
+            LargeTableEntryState::DirtyLoaded(_) => {}
             LargeTableEntryState::Unloaded(pos) => {
-                self.state = LargeTableEntryState::DirtyUnloaded(*pos, HashSet::default())
+                *self = LargeTableEntryState::DirtyUnloaded(*pos, HashSet::default())
             }
             LargeTableEntryState::DirtyUnloaded(_, _) => {}
         }
-        self.dirty_state()
-            .expect("prepare_for_mutation sets state to one of dirty states")
+        self.as_dirty_state().expect("mark_dirty sets state to one of dirty states")
     }
 
-    fn dirty_state(&mut self) -> Option<DirtyState> {
-        match &mut self.state {
+    pub fn as_dirty_state(&mut self) -> Option<DirtyState> {
+        match self {
             LargeTableEntryState::Empty => None,
             LargeTableEntryState::Unloaded(_) => None,
             LargeTableEntryState::Loaded(_) => None,
             LargeTableEntryState::DirtyUnloaded(_, dirty_keys) => {
                 Some(DirtyState::Unloaded(dirty_keys))
             }
-            LargeTableEntryState::DirtyLoaded => Some(DirtyState::Loaded),
+            LargeTableEntryState::DirtyLoaded(dirty_keys) => Some(DirtyState::Loaded(dirty_keys)),
         }
     }
 
-    fn unloaded_state(&self) -> Option<(UnloadedState, WalPosition)> {
-        match self.state {
+    pub fn as_unloaded_state(&self) -> Option<(UnloadedState, WalPosition)> {
+        match self {
             LargeTableEntryState::Empty => None,
-            LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, pos)),
+            LargeTableEntryState::Unloaded(pos) => Some((UnloadedState::Clean, *pos)),
             LargeTableEntryState::Loaded(_) => None,
-            LargeTableEntryState::DirtyUnloaded(pos, _) => Some((UnloadedState::Dirty, pos)),
-            LargeTableEntryState::DirtyLoaded => None,
+            LargeTableEntryState::DirtyUnloaded(pos, _) => Some((UnloadedState::Dirty, *pos)),
+            LargeTableEntryState::DirtyLoaded(_) => None,
         }
+    }
+
+    pub fn dirty_keys(&mut self) -> Option<&mut HashSet<Bytes>> {
+        Some(match self.as_dirty_state()? {
+            DirtyState::Loaded(dirty_keys) => dirty_keys,
+            DirtyState::Unloaded(dirty_keys) => dirty_keys,
+        })
     }
 }
 
 enum DirtyState<'a> {
-    Loaded,
+    Loaded(&'a mut HashSet<Bytes>),
     Unloaded(&'a mut HashSet<Bytes>),
 }
 
