@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
+use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
@@ -14,6 +15,7 @@ use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::fs::{File, OpenOptions};
+use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
@@ -174,8 +176,18 @@ impl Db {
         Ok(())
     }
 
+    /// Unordered iterator over entire database
     pub fn unordered_iterator(self: &Arc<Self>) -> UnorderedIterator {
         UnorderedIterator::new(self.clone())
+    }
+
+    /// Ordered iterator over a pre-defined range of keys.
+    ///
+    /// Both start and end of the range should have the same first 4 bytes,
+    /// otherwise this function panics.
+    pub fn range_ordered_iterator(self: &Arc<Self>, range: Range<Bytes>) -> RangeOrderedIterator {
+        let cell = self.large_table.read().range_cell(&range);
+        RangeOrderedIterator::new(self.clone(), cell, range)
     }
 
     /// Returns the next entry in the database.
@@ -563,8 +575,8 @@ mod test {
     }
 
     #[test]
-    fn test_iterator() {
-        let dir = tempdir::TempDir::new("test-iterator").unwrap();
+    fn test_unordered_iterator() {
+        let dir = tempdir::TempDir::new("test-unordered-iterator").unwrap();
         let config = Arc::new(Config::small());
         {
             let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
@@ -587,6 +599,50 @@ mod test {
             assert_eq!(s.len(), 2);
             assert!(s.contains(&(vec![1, 2, 3, 4].into(), vec![5, 6].into())));
             assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
+        }
+    }
+
+    #[test]
+    fn test_ordered_iterator() {
+        let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
+        let config = Arc::new(Config::small());
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let mut it = db.unordered_iterator();
+            assert!(it.next().is_none());
+            db.insert(vec![1, 2, 3, 4, 6], vec![1]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 5], vec![2]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 10], vec![3]).unwrap();
+            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
+            let mut it =
+                db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
+            let v: DbResult<Vec<_>> = it.collect();
+            let v = v.unwrap();
+            assert_eq!(v.len(), 2);
+            assert_eq!(
+                v.get(0).unwrap(),
+                &(vec![1, 2, 3, 4, 5].into(), vec![2].into())
+            );
+            assert_eq!(
+                v.get(1).unwrap(),
+                &(vec![1, 2, 3, 4, 6].into(), vec![1].into())
+            );
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let mut it =
+                db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
+            let v: DbResult<Vec<_>> = it.collect();
+            let v = v.unwrap();
+            assert_eq!(v.len(), 2);
+            assert_eq!(
+                v.get(0).unwrap(),
+                &(vec![1, 2, 3, 4, 5].into(), vec![2].into())
+            );
+            assert_eq!(
+                v.get(1).unwrap(),
+                &(vec![1, 2, 3, 4, 6].into(), vec![1].into())
+            );
         }
     }
 }

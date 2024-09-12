@@ -8,6 +8,7 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -179,14 +180,21 @@ impl LargeTable {
     }
 
     fn row(&self, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
+        let cell = self.cell_by_prefix(Self::cell_prefix(k));
+        let (mutex, offset) = Self::locate(cell);
+        let row = self.data.lock(mutex);
+        (row, offset)
+    }
+
+    fn cell_prefix(k: &[u8]) -> u32 {
         assert!(k.len() >= 4);
         let mut p = [0u8; 4];
         p.copy_from_slice(&k[..4]);
-        let pos = u32::from_le_bytes(p) as usize;
-        let pos = pos % self.config.large_table_size();
-        let (mutex, offset) = Self::locate(pos);
-        let row = self.data.lock(mutex);
-        (row, offset)
+        u32::from_le_bytes(p)
+    }
+
+    fn cell_by_prefix(&self, prefix: u32) -> usize {
+        (prefix as usize) % self.config.large_table_size()
     }
 
     /// Provides a snapshot of this large table.
@@ -263,6 +271,18 @@ impl LargeTable {
         }
     }
 
+    /// Returns the cell containing the range.
+    /// Right now, this only works if the entire range "fits" single cell.
+    pub fn range_cell(&self, range: &Range<Bytes>) -> usize {
+        let start_prefix = Self::cell_prefix(&range.start);
+        let end_prefix = Self::cell_prefix(&range.end);
+        if start_prefix == end_prefix {
+            self.cell_by_prefix(start_prefix)
+        } else {
+            panic!("Can't have ordered iterator over key range that does not fit same large table cell");
+        }
+    }
+
     fn next_cell(&self, cell: usize) -> Option<usize> {
         if cell >= self.config.large_table_size() - 1 {
             None
@@ -271,9 +291,9 @@ impl LargeTable {
         }
     }
 
-    fn locate(pos: usize) -> (usize, usize) {
-        let mutex = pos % LARGE_TABLE_MUTEXES;
-        let offset = pos / LARGE_TABLE_MUTEXES;
+    fn locate(cell: usize) -> (usize, usize) {
+        let mutex = cell % LARGE_TABLE_MUTEXES;
+        let offset = cell / LARGE_TABLE_MUTEXES;
         (mutex, offset)
     }
 }
