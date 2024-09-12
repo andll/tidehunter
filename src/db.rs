@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
+use crate::iterators::unordered::UnorderedIterator;
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
@@ -159,13 +160,7 @@ impl Db {
         let Some(position) = self.large_table.read().get(k, self)? else {
             return Ok(None);
         };
-        let entry = Self::read_entry_unmapped(&self.wal, position)?;
-        let value = if let WalEntry::Record(wal_key, v) = entry {
-            debug_assert_eq!(wal_key.as_ref(), k);
-            v
-        } else {
-            panic!("Unexpected wal entry where expected record");
-        };
+        let value = self.read_record(k, position)?;
         Ok(Some(value))
     }
 
@@ -177,6 +172,61 @@ impl Db {
             lock.insert(k, position, self)?;
         }
         Ok(())
+    }
+
+    pub fn unordered_iterator(self: &Arc<Self>) -> UnorderedIterator {
+        UnorderedIterator::new(self.clone())
+    }
+
+    /// Returns the next entry in the database.
+    /// Iterator must specify the cell to inspect and the (Optional) next key.
+    ///
+    /// If the next_key is set to None, the first key in the cell is returned.
+    ///
+    /// When iterating the entire DB, the iterator starts with cell=0 and next_key=None.
+    ///
+    /// The returned values:
+    /// (1) Next cell to read, None if iterator has reached the end of the DB.
+    /// (2) Next key to read.
+    ///     This value should be passed as is to next call of next_entry.
+    ///     None here **does not** mean iteration has ended.
+    /// (3) the key fetched by the iterator
+    /// (4) the value fetched by the iterator
+    ///
+    /// This function allows concurrent modification of the database.
+    /// If next_key is deleted,
+    /// the function will return the key-value pair next after the deleted key.
+    ///
+    /// As such, the returned key might not match the value passed in the next_key.
+    pub(crate) fn next_entry(
+        &self,
+        cell: usize,
+        next_key: Option<Bytes>,
+    ) -> DbResult<
+        Option<(
+            Option<usize>, /*next cell*/
+            Option<Bytes>, /*next key*/
+            Bytes,         /*fetched key*/
+            Bytes,         /*fetched value*/
+        )>,
+    > {
+        let Some((next_cell, next_key, key, wal_position)) =
+            self.large_table.read().next_entry(cell, next_key, self)?
+        else {
+            return Ok(None);
+        };
+        let value = self.read_record(&key, wal_position)?;
+        Ok(Some((next_cell, next_key, key, value)))
+    }
+
+    fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
+        let entry = Self::read_entry_unmapped(&self.wal, position)?;
+        if let WalEntry::Record(wal_key, v) = entry {
+            debug_assert_eq!(wal_key.as_ref(), k);
+            Ok(v)
+        } else {
+            panic!("Unexpected wal entry where expected record");
+        }
     }
 
     fn replay_wal(
@@ -422,6 +472,7 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn db_test() {
@@ -508,6 +559,34 @@ mod test {
             assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_iterator() {
+        let dir = tempdir::TempDir::new("test-iterator").unwrap();
+        let config = Arc::new(Config::small());
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let mut it = db.unordered_iterator();
+            assert!(it.next().is_none());
+            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
+            let mut it = db.unordered_iterator();
+            let s: DbResult<HashSet<_>> = it.collect();
+            let s = s.unwrap();
+            assert_eq!(s.len(), 2);
+            assert!(s.contains(&(vec![1, 2, 3, 4].into(), vec![5, 6].into())));
+            assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let mut it = db.unordered_iterator();
+            let s: DbResult<HashSet<_>> = it.collect();
+            let s = s.unwrap();
+            assert_eq!(s.len(), 2);
+            assert!(s.contains(&(vec![1, 2, 3, 4].into(), vec![5, 6].into())));
+            assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
         }
     }
 }

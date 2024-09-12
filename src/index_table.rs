@@ -46,6 +46,31 @@ impl IndexTable {
         self.data.get(k).copied()
     }
 
+    /// If next_entry is None returns first entry.
+    ///
+    /// If next_entry is not None, returns entry on or after specified next_entry.
+    ///
+    /// Returns tuple of a key, value and an optional next key if present.
+    ///
+    /// This works even if next is set to Some(k), but the value at k does not exist (for ex. was deleted).
+    /// For this reason, the returned key might be different from the next key requested.
+    pub fn next_entry(&self, next: Option<Bytes>) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
+        fn take_next<'a>(
+            mut iter: impl Iterator<Item = (&'a Bytes, &'a WalPosition)>,
+        ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
+            let (key, value) = iter.next()?;
+            let next_key = iter.next().map(|(k, _v)| k.clone());
+            Some((key.clone(), *value, next_key))
+        }
+
+        if let Some(next) = next {
+            let range = self.data.range(next..);
+            take_next(range.into_iter())
+        } else {
+            take_next(self.data.iter())
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.data.len()
     }

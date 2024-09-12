@@ -120,7 +120,7 @@ impl LargeTable {
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(&k);
-        let mut entry = row.entry_mut(offset);
+        let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
         self.metrics
@@ -138,7 +138,7 @@ impl LargeTable {
 
     pub fn remove<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(&k);
-        let mut entry = row.entry_mut(offset);
+        let entry = row.entry_mut(offset);
         Ok(entry.remove(k, v))
     }
 
@@ -223,6 +223,54 @@ impl LargeTable {
         }
     }
 
+    /// Takes a next entry in the large table.
+    ///
+    /// See Db::next_entry for documentation.
+    pub fn next_entry<L: Loader>(
+        &self,
+        mut cell: usize,
+        mut next_key: Option<Bytes>,
+        loader: &L,
+    ) -> Result<
+        Option<(
+            Option<usize>, /*next cell*/
+            Option<Bytes>, /*next key*/
+            Bytes,         /*fetched key*/
+            WalPosition,   /*fetched value*/
+        )>,
+        L::Error,
+    > {
+        loop {
+            let (row, offset) = Self::locate(cell);
+            let mut row = self.data.lock(row);
+            let entry = row.entry_mut(offset);
+            // todo lru logic
+            entry.maybe_load(loader)?;
+            if let Some((key, value, next_key)) = entry.next_entry(next_key) {
+                let next_cell = if next_key.is_none() {
+                    self.next_cell(cell)
+                } else {
+                    Some(cell)
+                };
+                return Ok(Some((next_cell, next_key, key, value)));
+            } else {
+                next_key = None;
+                let Some(next_cell) = self.next_cell(cell) else {
+                    return Ok(None);
+                };
+                cell = next_cell;
+            }
+        }
+    }
+
+    fn next_cell(&self, cell: usize) -> Option<usize> {
+        if cell >= self.config.large_table_size() - 1 {
+            None
+        } else {
+            Some(cell + 1)
+        }
+    }
+
     fn locate(pos: usize) -> (usize, usize) {
         let mutex = pos % LARGE_TABLE_MUTEXES;
         let offset = pos / LARGE_TABLE_MUTEXES;
@@ -298,6 +346,17 @@ impl LargeTableEntry {
             panic!("Can't get in unloaded state");
         }
         self.data.get(k)
+    }
+
+    /// See IndexTable::next_entry for documentation.
+    pub fn next_entry(
+        &self,
+        next_key: Option<Bytes>,
+    ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
+        if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
+            panic!("Can't next_entry in unloaded state");
+        }
+        self.data.next_entry(next_key)
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
