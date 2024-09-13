@@ -166,6 +166,10 @@ impl Db {
         Ok(Some(value))
     }
 
+    pub fn exists(&self, k: &[u8]) -> DbResult<bool> {
+        Ok(self.large_table.read().get(k, self)?.is_some())
+    }
+
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         // todo implement atomic durability
         let lock = self.large_table.read();
