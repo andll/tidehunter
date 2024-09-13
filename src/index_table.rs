@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashSet};
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct IndexTable {
+    // todo instead of loading entire BTreeMap in memory we should be able
+    // to load parts of it from disk
     data: BTreeMap<Bytes, WalPosition>,
 }
 
