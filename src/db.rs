@@ -673,4 +673,25 @@ mod test {
             assert!(!db.is_empty());
         }
     }
+
+    #[test]
+    fn test_small_keys() {
+        let dir = tempdir::TempDir::new("test-small-keys").unwrap();
+        let config = Arc::new(Config::small());
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            db.insert(vec![], vec![1]).unwrap();
+            db.insert(vec![1], vec![2]).unwrap();
+            db.insert(vec![1, 2], vec![3]).unwrap();
+            assert_eq!(db.get(&[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(&[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(&[1, 2]).unwrap(), Some(vec![3].into()));
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            assert_eq!(db.get(&[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(&[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(&[1, 2]).unwrap(), Some(vec![3].into()));
+        }
+    }
 }

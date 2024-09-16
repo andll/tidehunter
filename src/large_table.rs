@@ -7,6 +7,7 @@ use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
+use std::cmp;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::atomic::Ordering;
@@ -194,9 +195,9 @@ impl LargeTable {
     }
 
     fn cell_prefix(k: &[u8]) -> u32 {
-        assert!(k.len() >= 4);
+        let copy = cmp::min(k.len(), 4);
         let mut p = [0u8; 4];
-        p.copy_from_slice(&k[..4]);
+        p[..copy].copy_from_slice(&k[..copy]);
         u32::from_le_bytes(p)
     }
 
