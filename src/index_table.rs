@@ -2,6 +2,7 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::ops::RangeInclusive;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct IndexTable {
@@ -70,6 +71,21 @@ impl IndexTable {
             take_next(range.into_iter())
         } else {
             take_next(self.data.iter())
+        }
+    }
+
+    pub fn last_in_range(
+        &self,
+        from_included: &Bytes,
+        to_included: &Bytes,
+    ) -> Option<(Bytes, WalPosition)> {
+        let range = self
+            .data
+            .range::<Bytes, RangeInclusive<&Bytes>>(from_included..=to_included);
+        if let Some((bytes, position)) = range.last() {
+            Some((bytes.clone(), *position))
+        } else {
+            None
         }
     }
 

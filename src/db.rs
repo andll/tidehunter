@@ -198,8 +198,29 @@ impl Db {
     /// Both start and end of the range should have the same first 4 bytes,
     /// otherwise this function panics.
     pub fn range_ordered_iterator(self: &Arc<Self>, range: Range<Bytes>) -> RangeOrderedIterator {
-        let cell = self.large_table.read().range_cell(&range);
+        // todo (fix) technically with Range<Bytes> end of the range is exclusive
+        let cell = self.large_table.read().range_cell(&range.start, &range.end);
         RangeOrderedIterator::new(self.clone(), cell, range)
+    }
+
+    /// Returns last key-value pair in the given range, where both ends of the range are included
+    ///
+    /// Both start and end of the range should have the same first 4 bytes,
+    /// otherwise this function panics.
+    pub fn last_in_range(
+        &self,
+        from_included: &Bytes,
+        to_included: &Bytes,
+    ) -> DbResult<Option<(Bytes, Bytes)>> {
+        let Some((key, position)) =
+            self.large_table
+                .read()
+                .last_in_range(from_included, to_included, self)?
+        else {
+            return Ok(None);
+        };
+        let value = self.read_record(&key, position)?;
+        Ok(Some((key, value)))
     }
 
     /// Returns true if this db is empty.
@@ -701,5 +722,35 @@ mod test {
             assert_eq!(db.get(&[1]).unwrap(), Some(vec![2].into()));
             assert_eq!(db.get(&[1, 2]).unwrap(), Some(vec![3].into()));
         }
+    }
+
+    #[test]
+    fn test_last_in_range() {
+        let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
+        let config = Arc::new(Config::small());
+        let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+        db.insert(vec![1, 2, 3, 4, 6], vec![1]).unwrap();
+        db.insert(vec![1, 2, 3, 4, 5], vec![2]).unwrap();
+        db.insert(vec![1, 2, 3, 4, 10], vec![3]).unwrap();
+        assert_eq!(
+            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 8].into())
+                .unwrap(),
+            Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
+        );
+        assert_eq!(
+            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 6].into())
+                .unwrap(),
+            Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
+        );
+        assert_eq!(
+            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 5].into())
+                .unwrap(),
+            Some((vec![1, 2, 3, 4, 5].into(), vec![2].into()))
+        );
+        assert_eq!(
+            db.last_in_range(&vec![1, 2, 3, 4, 4].into(), &vec![1, 2, 3, 4, 4].into())
+                .unwrap(),
+            None
+        );
     }
 }

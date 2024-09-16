@@ -281,14 +281,32 @@ impl LargeTable {
 
     /// Returns the cell containing the range.
     /// Right now, this only works if the entire range "fits" single cell.
-    pub fn range_cell(&self, range: &Range<Bytes>) -> usize {
-        let start_prefix = Self::cell_prefix(&range.start);
-        let end_prefix = Self::cell_prefix(&range.end);
+    pub fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> usize {
+        let start_prefix = Self::cell_prefix(&from_included);
+        let end_prefix = Self::cell_prefix(&to_included);
         if start_prefix == end_prefix {
             self.cell_by_prefix(start_prefix)
         } else {
             panic!("Can't have ordered iterator over key range that does not fit same large table cell");
         }
+    }
+
+    /// See Db::last_in_range for documentation.
+    pub fn last_in_range<L: Loader>(
+        &self,
+        from_included: &Bytes,
+        to_included: &Bytes,
+        loader: &L,
+    ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
+        let cell = self.range_cell(from_included, to_included);
+        // todo duplicate code with next_entry(...)
+        let (row, offset) = Self::locate(cell);
+        let mut row = self.data.lock(row);
+        let entry = row.entry_mut(offset);
+        // todo lru logic
+        entry.maybe_load(loader)?;
+        // todo make sure can't have dirty markers in index in this state
+        Ok(entry.data.last_in_range(from_included, to_included))
     }
 
     fn next_cell(&self, cell: usize) -> Option<usize> {
