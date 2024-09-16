@@ -156,6 +156,13 @@ impl LargeTable {
         Ok(entry.get(k))
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.data
+            .mutexes()
+            .iter()
+            .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
+    }
+
     fn load_entry<'a, L: Loader>(
         &self,
         mut row: MutexGuard<'a, Row>,
@@ -453,6 +460,10 @@ impl LargeTableEntry {
         //     self.data.clear();
         // }
         Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self.state, LargeTableEntryState::Empty)
     }
 }
 

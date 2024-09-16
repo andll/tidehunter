@@ -13,6 +13,10 @@ impl<V, const N: usize> ShardedMutex<V, N> {
     pub fn lock(&self, n: usize) -> MutexGuard<'_, V> {
         self.0[n % self.0.len()].lock()
     }
+
+    pub fn mutexes(&self) -> &[Mutex<V>; N] {
+        &self.0
+    }
 }
 
 impl<V, const N: usize> AsRef<[Mutex<V>; N]> for ShardedMutex<V, N> {

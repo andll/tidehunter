@@ -194,6 +194,14 @@ impl Db {
         RangeOrderedIterator::new(self.clone(), cell, range)
     }
 
+    /// Returns true if this db is empty.
+    ///
+    /// (warn) Right now it returns true if db was never inserted true,
+    /// but may return false if entry was inserted and then deleted.
+    pub fn is_empty(&self) -> bool {
+        self.large_table.read().is_empty()
+    }
+
     /// Returns the next entry in the database.
     /// Iterator must specify the cell to inspect and the (Optional) next key.
     ///
@@ -588,7 +596,7 @@ mod test {
             assert!(it.next().is_none());
             db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
             db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
-            let mut it = db.unordered_iterator();
+            let it = db.unordered_iterator();
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
             assert_eq!(s.len(), 2);
@@ -597,7 +605,7 @@ mod test {
         }
         {
             let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            let mut it = db.unordered_iterator();
+            let it = db.unordered_iterator();
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
             assert_eq!(s.len(), 2);
@@ -618,7 +626,7 @@ mod test {
             db.insert(vec![1, 2, 3, 4, 5], vec![2]).unwrap();
             db.insert(vec![1, 2, 3, 4, 10], vec![3]).unwrap();
             db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
-            let mut it =
+            let it =
                 db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
@@ -634,7 +642,7 @@ mod test {
         }
         {
             let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            let mut it =
+            let it =
                 db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
@@ -647,6 +655,22 @@ mod test {
                 v.get(1).unwrap(),
                 &(vec![1, 2, 3, 4, 6].into(), vec![1].into())
             );
+        }
+    }
+
+    #[test]
+    fn test_empty() {
+        let dir = tempdir::TempDir::new("test-empty").unwrap();
+        let config = Arc::new(Config::small());
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            assert!(db.is_empty());
+            db.insert(vec![1, 2, 3, 4, 0], vec![1]).unwrap();
+            assert!(!db.is_empty());
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            assert!(!db.is_empty());
         }
     }
 }
