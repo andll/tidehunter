@@ -173,10 +173,18 @@ impl Db {
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         // todo implement atomic durability
         let lock = self.large_table.read();
-        for (k, w) in batch.into_writes() {
+        let WriteBatch { writes, deletes } = batch;
+
+        for (k, w) in writes {
             let position = self.wal_writer.write(&w)?;
             lock.insert(k, position, self)?;
         }
+
+        for (k, w) in deletes {
+            let position = self.wal_writer.write(&w)?;
+            lock.remove(k, position, self)?;
+        }
+
         Ok(())
     }
 
