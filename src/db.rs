@@ -176,15 +176,22 @@ impl Db {
         // todo implement atomic durability
         let lock = self.large_table.read();
         let WriteBatch { writes, deletes } = batch;
-
+        let mut last_position = WalPosition::INVALID;
         for (k, w) in writes {
             let position = self.wal_writer.write(&w)?;
             lock.insert(k, position, self)?;
+            last_position = position;
         }
 
         for (k, w) in deletes {
             let position = self.wal_writer.write(&w)?;
             lock.remove(k, position, self)?;
+            last_position = position;
+        }
+        if last_position != WalPosition::INVALID {
+            self.metrics
+                .wal_written_bytes
+                .set(last_position.as_u64() as i64);
         }
 
         Ok(())
