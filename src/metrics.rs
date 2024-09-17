@@ -6,6 +6,7 @@ pub struct Metrics {
     pub replayed_wal_records: IntCounter,
     pub max_index_size: AtomicUsize,
     pub max_index_size_metric: IntGauge,
+    pub wal_written_bytes: IntGauge,
     // pub loaded_keys_total: IntGauge,
     // pub loaded_keys_total_bytes: IntGauge,
 }
@@ -29,6 +30,7 @@ impl Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
             max_index_size: AtomicUsize::new(0),
             max_index_size_metric: gauge!("max_index_size_metric", registry),
+            wal_written_bytes: gauge!("wal_written_bytes", registry),
             // loaded_keys_total: gauge!("loaded_keys_total", registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };

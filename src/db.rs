@@ -17,7 +17,6 @@ use parking_lot::{Mutex, RwLock};
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io, thread};
@@ -29,6 +28,7 @@ pub struct Db {
     wal_writer: WalWriter,
     control_region_store: Mutex<ControlRegionStore>,
     config: Arc<Config>,
+    metrics: Arc<Metrics>,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -57,6 +57,7 @@ impl Db {
             wal,
             control_region_store,
             config,
+            metrics,
         })
     }
 
@@ -146,6 +147,7 @@ impl Db {
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
+        self.metrics.wal_written_bytes.set(position.as_u64() as i64);
         self.large_table.read().insert(k, position, self)?;
         Ok(())
     }

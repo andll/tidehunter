@@ -472,6 +472,10 @@ impl WalPosition {
             Some(self)
         }
     }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
 }
 
 #[allow(dead_code)]
