@@ -15,6 +15,7 @@ serde = { version = "1.0.208", features = ["derive"] }
 clap = { version = "4.5.16", features = ["derive"], optional = true }
 rand = { version = "0.8.5" , optional = true }
 tempdir = { version = "0.3.7" , optional = true}
+prometheus = "0.13.3"
 
 [dev-dependencies]
 tempdir = "0.3.7"

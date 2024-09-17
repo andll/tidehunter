@@ -296,14 +296,14 @@ impl Db {
             let entry = WalEntry::from_bytes(entry);
             match entry {
                 WalEntry::Record(k, _v) => {
-                    metrics.replayed_wal_records.fetch_add(1, Ordering::Relaxed);
+                    metrics.replayed_wal_records.inc();
                     large_table.insert(k, position, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(k) => {
-                    metrics.replayed_wal_records.fetch_add(1, Ordering::Relaxed);
+                    metrics.replayed_wal_records.inc();
                     large_table.remove(k, position, wal_iterator.wal())?;
                 }
             }
@@ -548,7 +548,7 @@ mod test {
             let metrics = Metrics::new();
             let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
             // nothing replayed from wal since we just rebuilt the control region
-            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 0);
+            assert_eq!(metrics.replayed_wal_records.get(), 0);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
             db.insert(vec![3, 4, 5, 6], vec![8]).unwrap();
@@ -557,7 +557,7 @@ mod test {
         {
             let metrics = Metrics::new();
             let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
-            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
+            assert_eq!(metrics.replayed_wal_records.get(), 1);
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }
@@ -609,7 +609,7 @@ mod test {
         {
             let metrics = Metrics::new();
             let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
-            assert_eq!(metrics.replayed_wal_records.load(Ordering::Relaxed), 1);
+            assert_eq!(metrics.replayed_wal_records.get(), 1);
             assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
         }

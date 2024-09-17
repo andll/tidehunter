@@ -135,6 +135,9 @@ impl LargeTable {
                 }
             })
             .ok();
+        self.metrics
+            .max_index_size_metric
+            .set(self.metrics.max_index_size.load(Ordering::Relaxed) as i64);
         Ok(())
     }
 
