@@ -9,7 +9,6 @@ use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use std::cmp;
 use std::collections::HashSet;
-use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
