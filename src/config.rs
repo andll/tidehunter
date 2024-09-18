@@ -2,14 +2,15 @@ use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
 use crate::wal::WalLayout;
 
+// todo - remove pub
 pub struct Config {
-    frag_size: u64,
-    large_table_size: usize,
-    max_maps: usize,
+    pub frag_size: u64,
+    pub large_table_size: usize,
+    pub max_maps: usize,
     /// Maximum number of loaded entries per LargeTable row
-    max_loaded: usize,
+    pub max_loaded: usize,
     /// How often to take snapshot depending on the number of entries written to the wal
-    snapshot_written_bytes: u64,
+    pub snapshot_written_bytes: u64,
 }
 
 impl Default for Config {
