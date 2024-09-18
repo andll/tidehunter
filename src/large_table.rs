@@ -121,6 +121,8 @@ impl LargeTable {
 
     pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(&k);
+        // todo duplicate code w/ self.row
+        let cell = self.cell_by_prefix(Self::cell_prefix(&k));
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
@@ -134,9 +136,15 @@ impl LargeTable {
                 }
             })
             .ok();
+
+        let max_index_size = self.metrics.max_index_size.load(Ordering::Relaxed);
         self.metrics
             .max_index_size_metric
-            .set(self.metrics.max_index_size.load(Ordering::Relaxed) as i64);
+            .set(max_index_size as i64);
+        if index_size == max_index_size {
+            self.metrics.max_index_size_cell.set(cell as i64);
+        }
+        self.metrics.index_size.observe(index_size as f64);
         Ok(())
     }
 
