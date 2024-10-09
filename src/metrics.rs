@@ -1,5 +1,5 @@
 use prometheus::{exponential_buckets, Histogram, IntCounter, IntGauge, Registry};
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 pub struct Metrics {
