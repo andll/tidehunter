@@ -552,6 +552,10 @@ mod test {
             assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
             assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
             db.rebuild_control_region().unwrap();
+            assert!(
+                db.large_table.read().is_all_clean(),
+                "Some entries are not clean after snapshot"
+            );
         }
         {
             let metrics = Metrics::new();

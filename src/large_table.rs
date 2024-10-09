@@ -332,6 +332,19 @@ impl LargeTable {
         let offset = cell / LARGE_TABLE_MUTEXES;
         (mutex, offset)
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_all_clean(&self) -> bool {
+        for mutex in self.data.as_ref().as_ref() {
+            let mut lock = mutex.lock();
+            for entry in lock.data.iter_mut() {
+                if entry.state.as_dirty_state().is_some() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Row {
