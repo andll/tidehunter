@@ -62,6 +62,14 @@ impl<T: Clone + Default> ArcCow<T> {
         // let Self::Owned(owned_mut) = self else { unreachable!() };
         // owned_mut
     }
+
+    #[allow(dead_code)]
+    pub fn borrow(&self) -> &T {
+        match self {
+            ArcCow::Owned(owned) => owned,
+            ArcCow::Shared(shared) => shared,
+        }
+    }
 }
 
 impl<T: Default> Default for ArcCow<T> {
