@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::RangeInclusive;
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct IndexTable {
     // todo instead of loading entire BTreeMap in memory we should be able
     // to load parts of it from disk

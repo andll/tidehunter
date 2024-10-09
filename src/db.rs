@@ -335,20 +335,25 @@ impl Db {
         let iter = Box::into_iter(snapshot.into_entries());
         let mut index_updates = vec![];
         let snapshot = iter
-            .enumerate()
-            .map(|(i, entry)| match entry {
-                LargeTableSnapshotEntry::Empty => Ok(WalPosition::INVALID),
-                LargeTableSnapshotEntry::Clean(pos) => Ok(pos),
+            .map(|entry| match entry {
+                LargeTableSnapshotEntry::Empty => {
+                    index_updates.push(None);
+                    Ok(WalPosition::INVALID)
+                }
+                LargeTableSnapshotEntry::Clean(pos) => {
+                    index_updates.push(None);
+                    Ok(pos)
+                }
                 LargeTableSnapshotEntry::Dirty(index) => {
                     let position = self.write_index(&index)?;
-                    index_updates.push((i, index, position));
+                    index_updates.push(Some((index, position)));
                     Ok(position)
                 }
                 LargeTableSnapshotEntry::DirtyUnloaded(pos, index) => {
                     let mut clean = self.load(pos)?;
                     clean.merge_dirty(&index);
                     let position = self.write_index(&clean)?;
-                    index_updates.push((i, index, position));
+                    index_updates.push(Some((index, position)));
                     Ok(position)
                 }
             })

@@ -29,7 +29,7 @@ impl Config {
     pub fn small() -> Self {
         Self {
             frag_size: 1024 * 1024,
-            large_table_size: 1024,
+            large_table_size: 2 * 1024,
             max_maps: 16,
             max_loaded: 1024,
             snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb

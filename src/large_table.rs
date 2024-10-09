@@ -239,14 +239,22 @@ impl LargeTable {
     }
 
     /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken.
-    pub fn maybe_update_entries(&self, updates: Vec<(usize, Arc<IndexTable>, WalPosition)>) {
-        // todo - it is possible to optimize this to minimize number of mutex locks
-        for (index, data, position) in updates {
-            let (mutex, offset) = Self::locate(index);
-            let mut lock = self.data.lock(mutex);
-            let entry = &mut lock.data[offset];
-            entry.maybe_set_to_clean(&data, position);
+    pub fn maybe_update_entries(&self, updates: Vec<Option<(Arc<IndexTable>, WalPosition)>>) {
+        // order in this iterator is consistent with what is
+        // produced by LargeTable::snapshot and
+        // with what is expected by LargeTable::from_iterator_size
+        let mut updates = updates.into_iter();
+        for i in 0..LARGE_TABLE_MUTEXES {
+            let mut lock = self.data.lock(i);
+            for entry in &mut lock.data {
+                let update = updates.next().expect("Not enough updates for large table");
+                let Some((data, position)) = update else {
+                    continue;
+                };
+                entry.maybe_set_to_clean(&data, position);
+            }
         }
+        assert!(updates.next().is_none(), "Too many updates for large table");
     }
 
     /// Takes a next entry in the large table.
@@ -459,6 +467,7 @@ impl LargeTableEntry {
     /// Updates dirty state to clean state if entry was not updated since the snapshot was taken
     pub fn maybe_set_to_clean(&mut self, expected: &Arc<IndexTable>, position: WalPosition) {
         if !self.data.same_shared(expected) {
+            println!("Not same {:?} ||| {:?}", self.data.borrow(), expected);
             // The entry has changed since the snapshot was taken
             return;
         }
