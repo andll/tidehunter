@@ -1,4 +1,6 @@
-use prometheus::{exponential_buckets, Histogram, IntCounter, IntGauge, Registry};
+use prometheus::{
+    exponential_buckets, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry,
+};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -9,10 +11,8 @@ pub struct Metrics {
     pub max_index_size_metric: IntGauge,
     pub max_index_size_cell: IntGauge,
     pub wal_written_bytes: IntGauge,
-    pub unload_unmerge: IntCounter,
-    pub unload_flush: IntCounter,
-    pub unload_dirty_unloaded: IntCounter,
-    pub unload_clean: IntCounter,
+    pub unload: IntCounterVec,
+    pub entry_state: IntGaugeVec,
     // pub loaded_keys_total: IntGauge,
     // pub loaded_keys_total_bytes: IntGauge,
 }
@@ -25,7 +25,14 @@ macro_rules! gauge (
 macro_rules! counter (
     ($name:expr, $r:expr) => {prometheus::register_int_counter_with_registry!($name, $name, $r).unwrap()};
 );
-
+#[macro_export]
+macro_rules! counter_vec (
+    ($name:expr, $b:expr, $r:expr) => {prometheus::register_int_counter_vec_with_registry!($name, $name, $b, $r).unwrap()};
+);
+#[macro_export]
+macro_rules! gauge_vec (
+    ($name:expr, $b:expr, $r:expr) => {prometheus::register_int_gauge_vec_with_registry!($name, $name, $b, $r).unwrap()};
+);
 #[macro_export]
 macro_rules! histogram (
     ($name:expr, $buck:expr, $r:expr) => {prometheus::register_histogram_with_registry!($name, $name, $buck.unwrap(), $r).unwrap()}
@@ -45,10 +52,8 @@ impl Metrics {
             max_index_size_metric: gauge!("max_index_size", registry),
             max_index_size_cell: gauge!("max_index_size_cell", registry),
             wal_written_bytes: gauge!("wal_written_bytes", registry),
-            unload_unmerge: counter!("unload_unmerge", registry),
-            unload_flush: counter!("unload_flush", registry),
-            unload_dirty_unloaded: counter!("unload_dirty_unloaded", registry),
-            unload_clean: counter!("unload_clean", registry),
+            unload: counter_vec!("unload", &["kind"], registry),
+            entry_state: gauge_vec!("entry_state", &["state"], registry),
             // loaded_keys_total: gauge!("loaded_keys_total", registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };

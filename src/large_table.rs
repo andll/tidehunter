@@ -7,7 +7,7 @@ use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{cmp, mem};
@@ -363,6 +363,22 @@ impl LargeTable {
         Ok(entry.data.last_in_range(from_included, to_included))
     }
 
+    pub fn report_entries_state(&self) {
+        let mut states: HashMap<_, i64> = HashMap::new();
+        for mutex in self.data.as_ref().as_ref() {
+            let mut lock = mutex.lock();
+            for entry in lock.data.iter() {
+                *states.entry(entry.state.name()).or_default() += 1;
+            }
+        }
+        for (label, value) in states {
+            self.metrics
+                .entry_state
+                .with_label_values(&[label])
+                .set(value);
+        }
+    }
+
     fn next_cell(&self, cell: usize) -> Option<usize> {
         if cell >= self.config.large_table_size() - 1 {
             None
@@ -539,13 +555,13 @@ impl LargeTableEntry {
             LargeTableEntryState::Empty => {}
             LargeTableEntryState::Unloaded(_) => {}
             LargeTableEntryState::Loaded(pos) => {
-                metrics.unload_clean.inc();
+                metrics.unload.with_label_values(&["clean"]).inc();
                 self.state = LargeTableEntryState::Unloaded(*pos);
                 self.data = Default::default();
             }
             LargeTableEntryState::DirtyUnloaded(_pos, _dirty_keys) => {
                 // load, merge, flush and unload -> Unloaded(..)
-                metrics.unload_dirty_unloaded.inc();
+                metrics.unload.with_label_values(&["dirty"]).inc();
                 self.maybe_load(loader)?;
                 assert!(matches!(
                     self.state,
@@ -559,14 +575,14 @@ impl LargeTableEntry {
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
                 if config.excess_dirty_keys(dirty_keys.len()) {
-                    metrics.unload_flush.inc();
+                    metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
                     let position = loader.unload(&self.data)?;
                     self.state = LargeTableEntryState::Unloaded(position);
                     self.data = Default::default();
                 } else {
-                    metrics.unload_unmerge.inc();
+                    metrics.unload.with_label_values(&["unmerge"]).inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
                     /*todo - avoid cloning dirty_keys, especially twice*/
                     self.data.make_mut().make_dirty(dirty_keys.clone());
