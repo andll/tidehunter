@@ -9,6 +9,10 @@ pub struct Metrics {
     pub max_index_size_metric: IntGauge,
     pub max_index_size_cell: IntGauge,
     pub wal_written_bytes: IntGauge,
+    pub unload_unmerge: IntCounter,
+    pub unload_flush: IntCounter,
+    pub unload_dirty_unloaded: IntCounter,
+    pub unload_clean: IntCounter,
     // pub loaded_keys_total: IntGauge,
     // pub loaded_keys_total_bytes: IntGauge,
 }
@@ -41,6 +45,10 @@ impl Metrics {
             max_index_size_metric: gauge!("max_index_size", registry),
             max_index_size_cell: gauge!("max_index_size_cell", registry),
             wal_written_bytes: gauge!("wal_written_bytes", registry),
+            unload_unmerge: counter!("unload_unmerge", registry),
+            unload_flush: counter!("unload_flush", registry),
+            unload_dirty_unloaded: counter!("unload_dirty_unloaded", registry),
+            unload_clean: counter!("unload_clean", registry),
             // loaded_keys_total: gauge!("loaded_keys_total", registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };

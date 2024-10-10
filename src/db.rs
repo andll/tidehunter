@@ -771,4 +771,102 @@ mod test {
             None
         );
     }
+
+    #[test]
+    pub fn test_dirty_unloading() {
+        let dir = tempdir::TempDir::new("test-dirty-unloading").unwrap();
+        let mut config = Config::small();
+        config.max_dirty_keys = 2;
+        config.max_loaded_entries = 1;
+        config.large_table_size = 2 * crate::large_table::LARGE_TABLE_MUTEXES;
+        let config = Arc::new(config);
+        #[track_caller]
+        fn check_all(db: &Db, last: u8) {
+            for i in 5u8..=last {
+                assert_eq!(db.get(&[1, 2, 3, 4, i]).unwrap(), Some(vec![i].into()));
+            }
+        }
+        #[track_caller]
+        fn check_metrics(metrics: &Metrics, unmerge: u64, flush: u64, dirty: u64, clean: u64) {
+            assert_eq!(
+                metrics.unload_unmerge.get(),
+                unmerge,
+                "unmerge metric does not match"
+            );
+            assert_eq!(
+                metrics.unload_flush.get(),
+                flush,
+                "flush metric does not match"
+            );
+            assert_eq!(
+                metrics.unload_dirty_unloaded.get(),
+                dirty,
+                "dirty metric does not match"
+            );
+            assert_eq!(
+                metrics.unload_clean.get(),
+                clean,
+                "clean metric does not match"
+            );
+        }
+        let other_key = vec![1, 6, 3, 4, 5];
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            {
+                let lt = db.large_table.read();
+                let (mutex1, cell1) = LargeTable::locate(lt.cell(&other_key));
+                let (mutex2, cell2) = LargeTable::locate(lt.cell(&[1, 2, 3, 4, 5]));
+                assert_eq!(mutex1, mutex2);
+                assert_ne!(cell1, cell2);
+                // code below is needed to search for other_key
+                // if layout of large table in test changes
+                // other_key should be from the same mutex but different cell
+                // This way we trigger unloading on the
+                // cell containing keys prefixed by [1, 2, 3, 4, ...]
+                //
+                // println!("A {:?}", LargeTable::locate(lt.cell(&[1, 2, 3, 4])));
+                // for i in 0..255 {
+                //     println!("{i} {:?}", LargeTable::locate(lt.cell(&[1, i, 3, 4])));
+                // }
+            }
+
+            db.insert(other_key.clone(), vec![5]).unwrap(); // fill one
+            db.insert(vec![1, 2, 3, 4, 5], vec![5]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 6], vec![6]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 7], vec![7]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 8], vec![8]).unwrap();
+            check_metrics(&db.metrics, 0, 1, 0, 0);
+            db.insert(vec![1, 2, 3, 4, 9], vec![9]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 10], vec![10]).unwrap();
+            check_all(&db, 10);
+            check_metrics(&db.metrics, 0, 1, 1, 0);
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            check_all(&db, 10);
+            check_metrics(&db.metrics, 0, 0, 0, 0);
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            db.insert(vec![1, 2, 3, 4, 11], vec![11]).unwrap();
+            db.insert(vec![1, 2, 3, 4, 12], vec![12]).unwrap();
+            check_metrics(&db.metrics, 0, 1, 0, 0);
+            check_all(&db, 12);
+            db.insert(vec![1, 2, 3, 4, 13], vec![13]).unwrap();
+            db.get(&other_key).unwrap().unwrap();
+            check_metrics(&db.metrics, 1, 1, 0, 0);
+        }
+        {
+            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            check_all(&db, 13);
+            check_metrics(&db.metrics, 0, 0, 0, 0);
+            db.rebuild_control_region().unwrap(); // this puts all entries into clean state
+            assert!(
+                db.large_table.read().is_all_clean(),
+                "Some entries are not clean after snapshot"
+            );
+            db.get(&other_key).unwrap().unwrap();
+            check_metrics(&db.metrics, 0, 0, 0, 1);
+        }
+    }
 }
