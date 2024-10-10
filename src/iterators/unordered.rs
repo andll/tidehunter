@@ -25,7 +25,7 @@ impl Iterator for UnorderedIterator {
         let Some(next_cell) = self.next_cell else {
             return None;
         };
-        match self.db.next_entry(next_cell, self.next_key.take()) {
+        match self.db.next_entry(next_cell, self.next_key.take(), true) {
             Ok(Some((next_cell, next_key, key, value))) => {
                 self.next_cell = next_cell;
                 self.next_key = next_key;

@@ -208,17 +208,17 @@ impl LargeTable {
         loader: &L,
     ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
         row.lru.insert(offset as u64); // entry will be loaded so no need to check count_as_loaded
-        // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
-        //     // todo - try to unload Loaded entry even if unload is not supported
-        //     let unload = row.lru.pop().expect("Lru is not empty");
-        //     assert_ne!(
-        //         unload, offset as u64,
-        //         "Attempting unload entry we are just trying to load"
-        //     );
-        //     // todo - we can try different approaches,
-        //     // for example prioritize unloading Loaded entries over Dirty entries
-        //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
-        // }
+                                       // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
+                                       //     // todo - try to unload Loaded entry even if unload is not supported
+                                       //     let unload = row.lru.pop().expect("Lru is not empty");
+                                       //     assert_ne!(
+                                       //         unload, offset as u64,
+                                       //         "Attempting unload entry we are just trying to load"
+                                       //     );
+                                       //     // todo - we can try different approaches,
+                                       //     // for example prioritize unloading Loaded entries over Dirty entries
+                                       //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
+                                       // }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
         Ok(entry)
@@ -297,6 +297,7 @@ impl LargeTable {
         mut cell: usize,
         mut next_key: Option<Bytes>,
         loader: &L,
+        cross_cell: bool,
     ) -> Result<
         Option<(
             Option<usize>, /*next cell*/
@@ -321,6 +322,9 @@ impl LargeTable {
                 return Ok(Some((next_cell, next_key, key, value)));
             } else {
                 next_key = None;
+                if !cross_cell {
+                    return Ok(None);
+                }
                 let Some(next_cell) = self.next_cell(cell) else {
                     return Ok(None);
                 };
@@ -714,5 +718,22 @@ impl Version {
 impl Default for LargeTableEntryState {
     fn default() -> Self {
         Self::Empty
+    }
+}
+
+mod test {
+    use super::*;
+    use crate::control::ControlRegion;
+
+    #[test]
+    fn test_a() {
+        let mut config = Config::default();
+        config.large_table_size = 2 * 1024;
+        let config = Arc::new(config);
+        let cr = ControlRegion::new_empty(config.large_table_size);
+        let lt = LargeTable::from_unloaded(cr.snapshot(), config, Metrics::new());
+        let c1 = lt.cell(b"\x06Z\xc64\x92\xd1\xb9\rx\xb6,\x87\xd7\xc2\xc1\x8b\xff\xf0\x0f\x86\xa3\x15F\xe4\x7f)\\(\x1e\xac@\x98/\x00\x00\x00\x00\x00\x00\x00\x00");
+        let c2 = lt.cell(b"\x00\xcf\xec\xb0S\xc6\x93\x14\xe7_6V\x19\x10\xf3S]\xd4f\xb6\xe2\xe3Y7\x08\xf3p\xe8\x04$az\xe7\x00\x00\x00\x00\x00\x00\x00\x01");
+        println!("c1 {c1}, c2 {c2}");
     }
 }
