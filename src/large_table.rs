@@ -561,7 +561,7 @@ impl LargeTableEntry {
             }
             LargeTableEntryState::DirtyUnloaded(_pos, _dirty_keys) => {
                 // load, merge, flush and unload -> Unloaded(..)
-                metrics.unload.with_label_values(&["dirty"]).inc();
+                metrics.unload.with_label_values(&["merge_flush"]).inc();
                 self.maybe_load(loader)?;
                 assert!(matches!(
                     self.state,
