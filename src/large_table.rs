@@ -208,17 +208,17 @@ impl LargeTable {
         loader: &L,
     ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
         row.lru.insert(offset as u64); // entry will be loaded so no need to check count_as_loaded
-        if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
-            // todo - try to unload Loaded entry even if unload is not supported
-            let unload = row.lru.pop().expect("Lru is not empty");
-            assert_ne!(
-                unload, offset as u64,
-                "Attempting unload entry we are just trying to load"
-            );
-            // todo - we can try different approaches,
-            // for example prioritize unloading Loaded entries over Dirty entries
-            row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
-        }
+        // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
+        //     // todo - try to unload Loaded entry even if unload is not supported
+        //     let unload = row.lru.pop().expect("Lru is not empty");
+        //     assert_ne!(
+        //         unload, offset as u64,
+        //         "Attempting unload entry we are just trying to load"
+        //     );
+        //     // todo - we can try different approaches,
+        //     // for example prioritize unloading Loaded entries over Dirty entries
+        //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
+        // }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
         Ok(entry)
