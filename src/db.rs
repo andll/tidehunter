@@ -794,24 +794,46 @@ mod test {
             }
         }
         #[track_caller]
-        fn check_metrics(metrics: &Metrics, unmerge: u64, flush: u64, dirty: u64, clean: u64) {
+        fn check_metrics(
+            metrics: &Metrics,
+            unmerge: u64,
+            flush: u64,
+            merge_flush: u64,
+            clean: u64,
+        ) {
             assert_eq!(
-                metrics.unload_unmerge.get(),
+                metrics
+                    .unload
+                    .get_metric_with_label_values(&["unmerge"])
+                    .unwrap()
+                    .get(),
                 unmerge,
                 "unmerge metric does not match"
             );
             assert_eq!(
-                metrics.unload_flush.get(),
+                metrics
+                    .unload
+                    .get_metric_with_label_values(&["flush"])
+                    .unwrap()
+                    .get(),
                 flush,
                 "flush metric does not match"
             );
             assert_eq!(
-                metrics.unload_dirty_unloaded.get(),
-                dirty,
-                "dirty metric does not match"
+                metrics
+                    .unload
+                    .get_metric_with_label_values(&["merge_flush"])
+                    .unwrap()
+                    .get(),
+                merge_flush,
+                "merge_flush metric does not match"
             );
             assert_eq!(
-                metrics.unload_clean.get(),
+                metrics
+                    .unload
+                    .get_metric_with_label_values(&["clean"])
+                    .unwrap()
+                    .get(),
                 clean,
                 "clean metric does not match"
             );
@@ -861,7 +883,9 @@ mod test {
             check_all(&db, 12);
             db.insert(vec![1, 2, 3, 4, 13], vec![13]).unwrap();
             db.get(&other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 1, 1, 0, 0);
+            check_metrics(&db.metrics, 0, 1, 0, 0);
+            // todo - uncomment when unloading on get is implemented
+            // check_metrics(&db.metrics, 1, 1, 0, 0);
         }
         {
             let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
@@ -873,7 +897,9 @@ mod test {
                 "Some entries are not clean after snapshot"
             );
             db.get(&other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 0, 0, 0, 1);
+            check_metrics(&db.metrics, 0, 0, 0, 0);
+            // todo - uncomment when unloading on get is implemented
+            // check_metrics(&db.metrics, 0, 0, 0, 1);
         }
     }
 }

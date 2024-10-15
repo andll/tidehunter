@@ -366,7 +366,7 @@ impl LargeTable {
     pub fn report_entries_state(&self) {
         let mut states: HashMap<_, i64> = HashMap::new();
         for mutex in self.data.as_ref().as_ref() {
-            let mut lock = mutex.lock();
+            let lock = mutex.lock();
             for entry in lock.data.iter() {
                 *states.entry(entry.state.name()).or_default() += 1;
             }
@@ -737,6 +737,7 @@ impl Default for LargeTableEntryState {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use crate::control::ControlRegion;
