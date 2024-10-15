@@ -8,9 +8,9 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::{cmp, mem};
 
 pub struct LargeTable {
     data: Box<ShardedMutex<Row, LARGE_TABLE_MUTEXES>>,
@@ -119,10 +119,14 @@ impl LargeTable {
         }
     }
 
-    pub fn insert<L: Loader>(&self, k: Bytes, v: WalPosition, loader: &L) -> Result<(), L::Error> {
-        let (mut row, offset) = self.row(&k);
-        // todo duplicate code w/ self.row
-        let cell = self.cell_by_prefix(Self::cell_prefix(&k));
+    pub fn insert<L: Loader>(
+        &self,
+        cell: usize,
+        k: Bytes,
+        v: WalPosition,
+        loader: &L,
+    ) -> Result<(), L::Error> {
+        let (mut row, offset) = self.row(cell);
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
@@ -151,8 +155,14 @@ impl LargeTable {
         Ok(())
     }
 
-    pub fn remove<L: Loader>(&self, k: Bytes, v: WalPosition, _loader: &L) -> Result<(), L::Error> {
-        let (mut row, offset) = self.row(&k);
+    pub fn remove<L: Loader>(
+        &self,
+        cell: usize,
+        k: Bytes,
+        v: WalPosition,
+        _loader: &L,
+    ) -> Result<(), L::Error> {
+        let (mut row, offset) = self.row(cell);
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
         if self.count_as_loaded(entry) {
@@ -161,8 +171,13 @@ impl LargeTable {
         Ok(())
     }
 
-    pub fn get<L: Loader>(&self, k: &[u8], loader: &L) -> Result<Option<WalPosition>, L::Error> {
-        let (mut row, offset) = self.row(k);
+    pub fn get<L: Loader>(
+        &self,
+        cell: usize,
+        k: &[u8],
+        loader: &L,
+    ) -> Result<Option<WalPosition>, L::Error> {
+        let (mut row, offset) = self.row(cell);
         row.lru.insert(offset as u64);
         let entry = row.entry_mut(offset);
         if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
@@ -208,43 +223,27 @@ impl LargeTable {
         loader: &L,
     ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
         row.lru.insert(offset as u64); // entry will be loaded so no need to check count_as_loaded
-                                       // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
-                                       //     // todo - try to unload Loaded entry even if unload is not supported
-                                       //     let unload = row.lru.pop().expect("Lru is not empty");
-                                       //     assert_ne!(
-                                       //         unload, offset as u64,
-                                       //         "Attempting unload entry we are just trying to load"
-                                       //     );
-                                       //     // todo - we can try different approaches,
-                                       //     // for example prioritize unloading Loaded entries over Dirty entries
-                                       //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
-                                       // }
+
+        // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
+        //     // todo - try to unload Loaded entry even if unload is not supported
+        //     let unload = row.lru.pop().expect("Lru is not empty");
+        //     assert_ne!(
+        //         unload, offset as u64,
+        //         "Attempting unload entry we are just trying to load"
+        //     );
+        //     // todo - we can try different approaches,
+        //     // for example prioritize unloading Loaded entries over Dirty entries
+        //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
+        // }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
         Ok(entry)
     }
 
-    fn row(&self, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
-        let cell = self.cell(k);
+    fn row(&self, cell: usize) -> (MutexGuard<'_, Row>, usize) {
         let (mutex, offset) = Self::locate(cell);
         let row = self.data.lock(mutex);
         (row, offset)
-    }
-
-    pub(crate) fn cell(&self, k: &[u8]) -> usize {
-        /* pub(crate) for tests */
-        self.cell_by_prefix(Self::cell_prefix(k))
-    }
-
-    fn cell_prefix(k: &[u8]) -> u32 {
-        let copy = cmp::min(k.len(), 4);
-        let mut p = [0u8; 4];
-        p[..copy].copy_from_slice(&k[..copy]);
-        u32::from_le_bytes(p)
-    }
-
-    fn cell_by_prefix(&self, prefix: u32) -> usize {
-        (prefix as usize) % self.config.large_table_size()
     }
 
     /// Provides a snapshot of this large table.
@@ -333,26 +332,14 @@ impl LargeTable {
         }
     }
 
-    /// Returns the cell containing the range.
-    /// Right now, this only works if the entire range "fits" single cell.
-    pub fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> usize {
-        let start_prefix = Self::cell_prefix(&from_included);
-        let end_prefix = Self::cell_prefix(&to_included);
-        if start_prefix == end_prefix {
-            self.cell_by_prefix(start_prefix)
-        } else {
-            panic!("Can't have ordered iterator over key range that does not fit same large table cell");
-        }
-    }
-
     /// See Db::last_in_range for documentation.
     pub fn last_in_range<L: Loader>(
         &self,
+        cell: usize,
         from_included: &Bytes,
         to_included: &Bytes,
         loader: &L,
     ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
-        let cell = self.range_cell(from_included, to_included);
         // todo duplicate code with next_entry(...)
         let (row, offset) = Self::locate(cell);
         let mut row = self.data.lock(row);
@@ -734,23 +721,5 @@ impl Version {
 impl Default for LargeTableEntryState {
     fn default() -> Self {
         Self::Empty
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::control::ControlRegion;
-
-    #[test]
-    fn test_a() {
-        let mut config = Config::default();
-        config.large_table_size = 2 * 1024;
-        let config = Arc::new(config);
-        let cr = ControlRegion::new_empty(config.large_table_size);
-        let lt = LargeTable::from_unloaded(cr.snapshot(), config, Metrics::new());
-        let c1 = lt.cell(b"\x06Z\xc64\x92\xd1\xb9\rx\xb6,\x87\xd7\xc2\xc1\x8b\xff\xf0\x0f\x86\xa3\x15F\xe4\x7f)\\(\x1e\xac@\x98/\x00\x00\x00\x00\x00\x00\x00\x00");
-        let c2 = lt.cell(b"\x00\xcf\xec\xb0S\xc6\x93\x14\xe7_6V\x19\x10\xf3S]\xd4f\xb6\xe2\xe3Y7\x08\xf3p\xe8\x04$az\xe7\x00\x00\x00\x00\x00\x00\x00\x01");
-        println!("c1 {c1}, c2 {c2}");
     }
 }

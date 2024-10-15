@@ -5,6 +5,7 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
+use crate::key_shape::KeyShape;
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
@@ -29,6 +30,7 @@ pub struct Db {
     control_region_store: Mutex<ControlRegionStore>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
+    key_shape: KeyShape,
 }
 
 pub type DbResult<T> = Result<T, DbError>;
@@ -37,6 +39,7 @@ pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 
 impl Db {
     pub fn open(path: &Path, config: Arc<Config>, metrics: Arc<Metrics>) -> DbResult<Self> {
+        let key_shape = KeyShape::from_config(&config);
         let cr = OpenOptions::new()
             .read(true)
             .write(true)
@@ -48,7 +51,7 @@ impl Db {
             LargeTable::from_unloaded(control_region.snapshot(), config.clone(), metrics.clone());
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
-        let wal_writer = Self::replay_wal(&large_table, wal_iterator, &metrics)?;
+        let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let large_table = RwLock::new(large_table);
         let control_region_store = Mutex::new(control_region_store);
         Ok(Self {
@@ -58,6 +61,7 @@ impl Db {
             control_region_store,
             config,
             metrics,
+            key_shape,
         })
     }
 
@@ -149,7 +153,8 @@ impl Db {
         let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        self.large_table.read().insert(k, position, self)?;
+        let cell = self.key_shape.cell(&k);
+        self.large_table.read().insert(cell, k, position, self)?;
         Ok(())
     }
 
@@ -158,11 +163,13 @@ impl Db {
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Remove(k.clone()));
         let position = self.wal_writer.write(&w)?;
-        Ok(self.large_table.read().remove(k, position, self)?)
+        let cell = self.key_shape.cell(&k);
+        Ok(self.large_table.read().remove(cell, k, position, self)?)
     }
 
     pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let Some(position) = self.large_table.read().get(k, self)? else {
+        let cell = self.key_shape.cell(&k);
+        let Some(position) = self.large_table.read().get(cell, k, self)? else {
             return Ok(None);
         };
         let value = self.read_record(k, position)?;
@@ -170,7 +177,8 @@ impl Db {
     }
 
     pub fn exists(&self, k: &[u8]) -> DbResult<bool> {
-        Ok(self.large_table.read().get(k, self)?.is_some())
+        let cell = self.key_shape.cell(&k);
+        Ok(self.large_table.read().get(cell, k, self)?.is_some())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
@@ -180,13 +188,15 @@ impl Db {
         let mut last_position = WalPosition::INVALID;
         for (k, w) in writes {
             let position = self.wal_writer.write(&w)?;
-            lock.insert(k, position, self)?;
+            let cell = self.key_shape.cell(&k);
+            lock.insert(cell, k, position, self)?;
             last_position = position;
         }
 
         for (k, w) in deletes {
             let position = self.wal_writer.write(&w)?;
-            lock.remove(k, position, self)?;
+            let cell = self.key_shape.cell(&k);
+            lock.remove(cell, k, position, self)?;
             last_position = position;
         }
         if last_position != WalPosition::INVALID {
@@ -209,7 +219,7 @@ impl Db {
     /// otherwise this function panics.
     pub fn range_ordered_iterator(self: &Arc<Self>, range: Range<Bytes>) -> RangeOrderedIterator {
         // todo (fix) technically with Range<Bytes> end of the range is exclusive
-        let cell = self.large_table.read().range_cell(&range.start, &range.end);
+        let cell = self.key_shape.range_cell(&range.start, &range.end);
         RangeOrderedIterator::new(self.clone(), cell, range)
     }
 
@@ -222,10 +232,11 @@ impl Db {
         from_included: &Bytes,
         to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
+        let cell = self.key_shape.range_cell(from_included, to_included);
         let Some((key, position)) =
             self.large_table
                 .read()
-                .last_in_range(from_included, to_included, self)?
+                .last_in_range(cell, from_included, to_included, self)?
         else {
             return Ok(None);
         };
@@ -299,6 +310,7 @@ impl Db {
     }
 
     fn replay_wal(
+        key_shape: &KeyShape,
         large_table: &LargeTable,
         mut wal_iterator: WalIterator,
         metrics: &Metrics,
@@ -313,14 +325,16 @@ impl Db {
             match entry {
                 WalEntry::Record(k, _v) => {
                     metrics.replayed_wal_records.inc();
-                    large_table.insert(k, position, wal_iterator.wal())?;
+                    let cell = key_shape.cell(&k);
+                    large_table.insert(cell, k, position, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(k) => {
                     metrics.replayed_wal_records.inc();
-                    large_table.remove(k, position, wal_iterator.wal())?;
+                    let cell = key_shape.cell(&k);
+                    large_table.remove(cell, k, position, wal_iterator.wal())?;
                 }
             }
         }
@@ -842,9 +856,8 @@ mod test {
         {
             let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
             {
-                let lt = db.large_table.read();
-                let (mutex1, cell1) = LargeTable::locate(lt.cell(&other_key));
-                let (mutex2, cell2) = LargeTable::locate(lt.cell(&[1, 2, 3, 4, 5]));
+                let (mutex1, cell1) = LargeTable::locate(db.key_shape.cell(&other_key));
+                let (mutex2, cell2) = LargeTable::locate(db.key_shape.cell(&[1, 2, 3, 4, 5]));
                 assert_eq!(mutex1, mutex2);
                 assert_ne!(cell1, cell2);
                 // code below is needed to search for other_key
