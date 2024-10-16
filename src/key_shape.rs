@@ -7,18 +7,7 @@ pub struct KeyShape {
     key_spaces: Vec<KeySpaceDesc>,
 }
 
-#[derive(Clone)]
-pub struct KeySpaceDesc {
-    range: Range<usize>,
-    config: KeySpaceConfig,
-}
-
-#[derive(Default, Clone)]
-pub struct KeySpaceConfig {
-    key_offset: usize,
-}
-
-pub struct KeySpaceBuilder {
+pub struct KeyShapeBuilder {
     large_table_size: usize,
     frac_base: usize,
     const_spaces: usize,
@@ -29,7 +18,18 @@ pub struct KeySpaceBuilder {
 #[derive(Clone, Copy)]
 pub struct KeySpace(pub(crate) u8);
 
-impl KeySpaceBuilder {
+#[derive(Clone)]
+struct KeySpaceDesc {
+    range: Range<usize>,
+    config: KeySpaceConfig,
+}
+
+#[derive(Default, Clone)]
+struct KeySpaceConfig {
+    key_offset: usize,
+}
+
+impl KeyShapeBuilder {
     pub fn from_config(config: &Config, frac_base: usize) -> Self {
         let large_table_size = config.large_table_size();
         Self {
