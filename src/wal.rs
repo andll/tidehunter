@@ -449,6 +449,10 @@ impl PreparedWalWrite {
         let frame = CrcFrame::new(t);
         Self { frame }
     }
+
+    pub fn len(&self) -> usize {
+        self.frame.len_with_header()
+    }
 }
 
 impl WalPosition {

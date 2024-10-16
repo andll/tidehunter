@@ -155,6 +155,10 @@ impl Db {
         let v = v.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Record(ks, k.clone(), v));
+        self.metrics
+            .wal_written_bytes_type
+            .with_label_values(&["record"])
+            .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
         let cell = self.key_shape.cell(ks, &k);
@@ -166,6 +170,10 @@ impl Db {
         let k = k.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Remove(ks, k.clone()));
+        self.metrics
+            .wal_written_bytes_type
+            .with_label_values(&["tombstone"])
+            .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         let cell = self.key_shape.cell(ks, &k);
         Ok(self.large_table.read().remove(cell, k, position, self)?)
@@ -191,6 +199,10 @@ impl Db {
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
         for (ks, k, w) in writes {
+            self.metrics
+                .wal_written_bytes_type
+                .with_label_values(&["record"])
+                .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
             let cell = self.key_shape.cell(ks, &k);
             lock.insert(cell, k, position, self)?;
@@ -198,6 +210,10 @@ impl Db {
         }
 
         for (ks, k, w) in deletes {
+            self.metrics
+                .wal_written_bytes_type
+                .with_label_values(&["tombstone"])
+                .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
             let cell = self.key_shape.cell(ks, &k);
             lock.remove(cell, k, position, self)?;
@@ -393,6 +409,10 @@ impl Db {
         let index = bincode::serialize(index)?;
         let index = index.into();
         let w = PreparedWalWrite::new(&WalEntry::Index(index));
+        self.metrics
+            .wal_written_bytes_type
+            .with_label_values(&["index"])
+            .inc_by(w.len() as u64);
         Ok(self.wal_writer.write(&w)?)
     }
 
