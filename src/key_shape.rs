@@ -25,6 +25,7 @@ pub struct KeySpace(pub(crate) u8);
 
 #[derive(Clone)]
 pub(crate) struct KeySpaceDesc {
+    name: String,
     range: Range<usize>,
     config: KeySpaceConfig,
 }
@@ -55,8 +56,8 @@ impl KeyShapeBuilder {
         }
     }
 
-    pub fn const_key_space(&mut self, size: usize) -> KeySpace {
-        self.const_key_space_config(size, KeySpaceConfig::default())
+    pub fn const_key_space(&mut self, name: impl Into<String>, size: usize) -> KeySpace {
+        self.const_key_space_config(name, size, KeySpaceConfig::default())
     }
 
     /// round up const_spaces to a multiple of LARGE_TABLE_MUTEXES and return const_space size
@@ -65,7 +66,13 @@ impl KeyShapeBuilder {
         b * LARGE_TABLE_MUTEXES
     }
 
-    pub fn const_key_space_config(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn const_key_space_config(
+        &mut self,
+        name: impl Into<String>,
+        size: usize,
+        config: KeySpaceConfig,
+    ) -> KeySpace {
+        let name = name.into();
         assert!(size > 0, "Key space size should be greater then 0");
         assert!(
             size + self.const_spaces <= self.large_table_size,
@@ -78,14 +85,24 @@ impl KeyShapeBuilder {
         let start = self.const_spaces;
         self.const_spaces += size;
         let range = start..self.const_spaces;
-        self.add_key_space(KeySpaceDesc { range, config })
+        self.add_key_space(KeySpaceDesc {
+            name,
+            range,
+            config,
+        })
     }
 
-    pub fn frac_key_space(&mut self, frac: usize) -> KeySpace {
-        self.frac_key_space_config(frac, KeySpaceConfig::default())
+    pub fn frac_key_space(&mut self, name: impl Into<String>, frac: usize) -> KeySpace {
+        self.frac_key_space_config(name, frac, KeySpaceConfig::default())
     }
 
-    pub fn frac_key_space_config(&mut self, frac: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn frac_key_space_config(
+        &mut self,
+        name: impl Into<String>,
+        frac: usize,
+        config: KeySpaceConfig,
+    ) -> KeySpace {
+        let name = name.into();
         assert!(frac > 0, "Key space size should be greater then 0");
         assert!(
             frac + self.frac_spaces <= self.frac_base,
@@ -105,7 +122,11 @@ impl KeyShapeBuilder {
         self.frac_spaces += frac;
         let end = self.const_spaces + self.frac_spaces * per_frac;
         let range = start..end;
-        self.add_key_space(KeySpaceDesc { range, config })
+        self.add_key_space(KeySpaceDesc {
+            name,
+            range,
+            config,
+        })
     }
 
     fn add_key_space(&mut self, key_space: KeySpaceDesc) -> KeySpace {
@@ -197,6 +218,7 @@ impl KeySpaceConfig {
 impl KeyShape {
     pub fn new_whole(config: &Config) -> (Self, KeySpace) {
         let key_space = KeySpaceDesc {
+            name: "root".into(),
             range: 0..config.large_table_size,
             config: Default::default(),
         };
@@ -234,9 +256,9 @@ impl KeyShape {
 #[test]
 fn test_ks_builder() {
     let mut ksb = KeyShapeBuilder::new(1024 * 1024 + 1, 8);
-    let ks1 = ksb.const_key_space(1);
-    let ks2 = ksb.frac_key_space(1);
-    let ks3 = ksb.frac_key_space(2);
+    let ks1 = ksb.const_key_space("a", 1);
+    let ks2 = ksb.frac_key_space("b", 1);
+    let ks3 = ksb.frac_key_space("c", 2);
     let shape = ksb.build();
     assert_eq!(0..1, shape.key_space_range(ks1));
     assert_eq!(1..(1 + 1024 * 1024 / 8), shape.key_space_range(ks2));
