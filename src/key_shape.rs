@@ -33,6 +33,10 @@ pub struct KeySpaceConfig {
 impl KeyShapeBuilder {
     pub fn from_config(config: &Config, frac_base: usize) -> Self {
         let large_table_size = config.large_table_size();
+        Self::new(large_table_size, frac_base)
+    }
+
+    pub fn new(large_table_size: usize, frac_base: usize) -> Self {
         Self {
             large_table_size,
             const_spaces: 0,
@@ -88,9 +92,9 @@ impl KeyShapeBuilder {
             "Total frac space ({total_frac_space}) is not divisible by requested frac_base({})",
             self.frac_base
         );
-        let start = self.frac_spaces * per_frac;
+        let start = self.const_spaces + self.frac_spaces * per_frac;
         self.frac_spaces += frac;
-        let end = self.frac_spaces * per_frac;
+        let end = self.const_spaces + self.frac_spaces * per_frac;
         let range = start..end;
         self.add_key_space(KeySpaceDesc { range, config })
     }
@@ -107,8 +111,23 @@ impl KeyShapeBuilder {
     }
 
     pub fn build(self) -> KeyShape {
+        self.check_no_overlap();
         KeyShape {
             key_spaces: self.key_spaces,
+        }
+    }
+
+    fn check_no_overlap(&self) {
+        let mut last: Option<usize> = None;
+        for (i, ks) in self.key_spaces.iter().enumerate() {
+            if let Some(last) = last {
+                let start = ks.range.start;
+                assert!(
+                    start >= last,
+                    "Found overlap: ks {i} starting at {start}, previous ended at {last}"
+                );
+            }
+            last = Some(ks.range.end);
         }
     }
 }
@@ -189,4 +208,19 @@ impl KeyShape {
         };
         key_space
     }
+}
+
+#[test]
+fn test_ks_builder() {
+    let mut ksb = KeyShapeBuilder::new(1024 * 1024 + 1, 8);
+    let ks1 = ksb.const_key_space(1);
+    let ks2 = ksb.frac_key_space(1);
+    let ks3 = ksb.frac_key_space(2);
+    let shape = ksb.build();
+    assert_eq!(0..1, shape.key_space_range(ks1));
+    assert_eq!(1..(1 + 1024 * 1024 / 8), shape.key_space_range(ks2));
+    assert_eq!(
+        (1 + 1024 * 1024 / 8)..(1 + 1024 * 1024 / 8 * 3),
+        shape.key_space_range(ks3)
+    );
 }
