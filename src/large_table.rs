@@ -557,7 +557,7 @@ impl LargeTableEntry {
                     self.state,
                     LargeTableEntryState::DirtyLoaded(_, _)
                 ));
-                self.unload_dirty_loaded(ks, loader)?;
+                self.unload_dirty_loaded(ks, loader, metrics)?;
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
@@ -565,7 +565,7 @@ impl LargeTableEntry {
                     metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
-                    self.unload_dirty_loaded(ks, loader)?;
+                    self.unload_dirty_loaded(ks, loader, metrics)?;
                 } else {
                     metrics.unload.with_label_values(&["unmerge"]).inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
@@ -589,13 +589,19 @@ impl LargeTableEntry {
 
     fn unload_dirty_loaded<L: Loader>(
         &mut self,
-        // metrics: &Metrics,
         ks: &KeySpaceDesc,
         loader: &L,
+        metrics: &Metrics,
     ) -> Result<(), L::Error> {
         if let Some(compactor) = ks.compactor() {
-            // metrics.compacted_keys.with_label_values()
-            compactor(&mut self.data.make_mut().data);
+            let index = self.data.make_mut();
+            let pre_compact_len = index.len();
+            compactor(&mut index.data);
+            let compacted = pre_compact_len.saturating_sub(index.len());
+            metrics
+                .compacted_keys
+                .with_label_values(&[ks.name()])
+                .inc_by(compacted as u64);
         }
         let position = loader.unload(&self.data)?;
         self.state = LargeTableEntryState::Unloaded(position);

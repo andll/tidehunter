@@ -195,6 +195,10 @@ impl KeySpaceDesc {
     pub(crate) fn compactor(&self) -> Option<&Compactor> {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl KeySpaceConfig {
