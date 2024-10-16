@@ -170,6 +170,11 @@ impl KeyShape {
         self.ks(ks).range_cell(from_included, to_included)
     }
 
+    pub(crate) fn key_space_range(&self, ks: KeySpace) -> Range<usize> {
+        let ks = self.ks(ks);
+        ks.range.clone()
+    }
+
     fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
         self.key_spaces
             .get(ks.0 as usize)

@@ -213,8 +213,8 @@ impl Db {
     }
 
     /// Unordered iterator over entire database
-    pub fn unordered_iterator(self: &Arc<Self>) -> UnorderedIterator {
-        UnorderedIterator::new(self.clone())
+    pub fn unordered_iterator(self: &Arc<Self>, ks: KeySpace) -> UnorderedIterator {
+        UnorderedIterator::new(self.clone(), self.key_shape.key_space_range(ks))
     }
 
     /// Ordered iterator over a pre-defined range of keys.
@@ -735,11 +735,11 @@ mod test {
                 )
                 .unwrap(),
             );
-            let mut it = db.unordered_iterator();
+            let mut it = db.unordered_iterator(ks);
             assert!(it.next().is_none());
             db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
             db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
-            let it = db.unordered_iterator();
+            let it = db.unordered_iterator(ks);
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
             assert_eq!(s.len(), 2);
@@ -756,7 +756,7 @@ mod test {
                 )
                 .unwrap(),
             );
-            let it = db.unordered_iterator();
+            let it = db.unordered_iterator(ks);
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
             assert_eq!(s.len(), 2);
@@ -780,7 +780,7 @@ mod test {
                 )
                 .unwrap(),
             );
-            let mut it = db.unordered_iterator();
+            let mut it = db.unordered_iterator(ks);
             assert!(it.next().is_none());
             db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();

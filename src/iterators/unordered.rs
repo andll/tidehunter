@@ -1,19 +1,22 @@
 use crate::db::{Db, DbResult};
 use minibytes::Bytes;
+use std::ops::Range;
 use std::sync::Arc;
 
 pub struct UnorderedIterator {
     db: Arc<Db>,
+    cell_range: Range<usize>,
     next_cell: Option<usize>,
     next_key: Option<Bytes>,
 }
 
 impl UnorderedIterator {
-    pub(crate) fn new(db: Arc<Db>) -> Self {
+    pub(crate) fn new(db: Arc<Db>, cell_range: Range<usize>) -> Self {
         Self {
             db,
-            next_cell: Some(0),
+            next_cell: Some(cell_range.start),
             next_key: None,
+            cell_range,
         }
     }
 }
@@ -25,6 +28,9 @@ impl Iterator for UnorderedIterator {
         let Some(next_cell) = self.next_cell else {
             return None;
         };
+        if next_cell >= self.cell_range.end {
+            return None;
+        }
         match self.db.next_entry(next_cell, self.next_key.take(), true) {
             Ok(Some((next_cell, next_key, key, value))) => {
                 self.next_cell = next_cell;
