@@ -101,8 +101,9 @@ impl KeyShapeBuilder {
             "Maximum {} key spaces allowed",
             u8::MAX
         );
+        let ks = KeySpace(self.key_spaces.len() as u8);
         self.key_spaces.push(key_space);
-        KeySpace(self.key_spaces.len() as u8)
+        ks
     }
 
     pub fn build(self) -> KeyShape {
