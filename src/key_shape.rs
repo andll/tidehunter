@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::large_table::LARGE_TABLE_MUTEXES;
 use std::cmp;
 use std::ops::Range;
 
@@ -43,6 +44,12 @@ impl KeyShapeBuilder {
 
     pub fn const_key_space(&mut self, size: usize) -> KeySpace {
         self.const_key_space_config(size, KeySpaceConfig::default())
+    }
+
+    /// round up const_spaces to a multiple of LARGE_TABLE_MUTEXES and return const_space size
+    pub fn pad_const_space(&mut self) -> usize {
+        let b = (self.const_spaces + LARGE_TABLE_MUTEXES - 1) / LARGE_TABLE_MUTEXES;
+        b * LARGE_TABLE_MUTEXES
     }
 
     pub fn const_key_space_config(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
