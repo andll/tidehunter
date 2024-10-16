@@ -91,7 +91,7 @@ impl Db {
                 // todo taint db instance on failure?
                 db.rebuild_control_region()
                     .expect("Failed to rebuild control region");
-                position = current_position;
+                position = db.wal_writer.position();
             }
         }
     }
