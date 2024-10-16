@@ -285,10 +285,7 @@ impl Db {
         &self,
         cell: usize,
         next_key: Option<Bytes>,
-        // whether to loop across cells for the next item
-        // next_cell might still point to next value if this is false
-        // however if cross_cell=false, the returned key will always be from the requested cell
-        cross_cell: bool,
+        max_cell_exclusive: usize,
     ) -> DbResult<
         Option<(
             Option<usize>, /*next cell*/
@@ -297,10 +294,10 @@ impl Db {
             Bytes,         /*fetched value*/
         )>,
     > {
-        let Some((next_cell, next_key, key, wal_position)) = self
-            .large_table
-            .read()
-            .next_entry(cell, next_key, self, cross_cell)?
+        let Some((next_cell, next_key, key, wal_position)) =
+            self.large_table
+                .read()
+                .next_entry(cell, next_key, self, max_cell_exclusive)?
         else {
             return Ok(None);
         };

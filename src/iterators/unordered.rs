@@ -31,7 +31,10 @@ impl Iterator for UnorderedIterator {
         if next_cell >= self.cell_range.end {
             return None;
         }
-        match self.db.next_entry(next_cell, self.next_key.take(), true) {
+        match self
+            .db
+            .next_entry(next_cell, self.next_key.take(), self.cell_range.end)
+        {
             Ok(Some((next_cell, next_key, key, value))) => {
                 self.next_cell = next_cell;
                 self.next_key = next_key;

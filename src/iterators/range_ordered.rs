@@ -27,7 +27,7 @@ impl Iterator for RangeOrderedIterator {
 
     fn next(&mut self) -> Option<DbResult<(Bytes, Bytes)>> {
         let next_key = self.next_key.take()?;
-        match self.db.next_entry(self.cell, Some(next_key), false) {
+        match self.db.next_entry(self.cell, Some(next_key), self.cell + 1) {
             Ok(Some((next_cell, next_key, key, value))) => {
                 if next_cell == Some(self.cell) {
                     self.next_key = if let Some(next_key) = next_key {

@@ -296,7 +296,7 @@ impl LargeTable {
         mut cell: usize,
         mut next_key: Option<Bytes>,
         loader: &L,
-        cross_cell: bool,
+        max_cell_exclusive: usize,
     ) -> Result<
         Option<(
             Option<usize>, /*next cell*/
@@ -321,12 +321,12 @@ impl LargeTable {
                 return Ok(Some((next_cell, next_key, key, value)));
             } else {
                 next_key = None;
-                if !cross_cell {
-                    return Ok(None);
-                }
                 let Some(next_cell) = self.next_cell(cell) else {
                     return Ok(None);
                 };
+                if next_cell >= max_cell_exclusive {
+                    return Ok(None);
+                }
                 cell = next_cell;
             }
         }
