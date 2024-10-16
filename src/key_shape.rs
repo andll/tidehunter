@@ -4,11 +4,11 @@ use std::ops::Range;
 
 #[derive(Clone)]
 pub struct KeyShape {
-    key_spaces: Vec<KeySpace>,
+    key_spaces: Vec<KeySpaceDesc>,
 }
 
 #[derive(Clone)]
-pub struct KeySpace {
+pub struct KeySpaceDesc {
     range: Range<usize>,
     config: KeySpaceConfig,
 }
@@ -23,11 +23,11 @@ pub struct KeySpaceBuilder {
     frac_base: usize,
     const_spaces: usize,
     frac_spaces: usize,
-    key_spaces: Vec<KeySpace>,
+    key_spaces: Vec<KeySpaceDesc>,
 }
 
 #[derive(Clone, Copy)]
-pub struct Ks(pub(crate) u8);
+pub struct KeySpace(pub(crate) u8);
 
 impl KeySpaceBuilder {
     pub fn from_config(config: &Config, frac_base: usize) -> Self {
@@ -41,7 +41,7 @@ impl KeySpaceBuilder {
         }
     }
 
-    pub fn const_key_space(&mut self, size: usize, config: KeySpaceConfig) -> Ks {
+    pub fn const_key_space(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
         assert!(size > 0, "Key space size should be greater then 0");
         assert!(
             size + self.const_spaces <= self.large_table_size,
@@ -54,10 +54,10 @@ impl KeySpaceBuilder {
         let start = self.const_spaces;
         self.const_spaces += size;
         let range = start..self.const_spaces;
-        self.add_key_space(KeySpace { range, config })
+        self.add_key_space(KeySpaceDesc { range, config })
     }
 
-    pub fn frac_key_space(&mut self, frac: usize, config: KeySpaceConfig) -> Ks {
+    pub fn frac_key_space(&mut self, frac: usize, config: KeySpaceConfig) -> KeySpace {
         assert!(frac > 0, "Key space size should be greater then 0");
         assert!(
             frac + self.frac_spaces <= self.frac_base,
@@ -77,17 +77,17 @@ impl KeySpaceBuilder {
         self.frac_spaces += frac;
         let end = self.frac_spaces * per_frac;
         let range = start..end;
-        self.add_key_space(KeySpace { range, config })
+        self.add_key_space(KeySpaceDesc { range, config })
     }
 
-    fn add_key_space(&mut self, key_space: KeySpace) -> Ks {
+    fn add_key_space(&mut self, key_space: KeySpaceDesc) -> KeySpace {
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
             "Maximum {} key spaces allowed",
             u8::MAX
         );
         self.key_spaces.push(key_space);
-        Ks(self.key_spaces.len() as u8)
+        KeySpace(self.key_spaces.len() as u8)
     }
 
     pub fn build(self) -> KeyShape {
@@ -96,7 +96,7 @@ impl KeySpaceBuilder {
         }
     }
 }
-impl KeySpace {
+impl KeySpaceDesc {
     pub(crate) fn cell(&self, k: &[u8]) -> usize {
         self.cell_by_prefix(self.cell_prefix(k))
     }
@@ -139,25 +139,30 @@ impl KeySpaceConfig {
 }
 
 impl KeyShape {
-    pub fn new_whole(config: &Config) -> (Self, Ks) {
-        let key_space = KeySpace {
+    pub fn new_whole(config: &Config) -> (Self, KeySpace) {
+        let key_space = KeySpaceDesc {
             range: 0..config.large_table_size,
             config: Default::default(),
         };
         let key_spaces = vec![key_space];
         let this = Self { key_spaces };
-        (this, Ks(0))
+        (this, KeySpace(0))
     }
 
-    pub(crate) fn cell(&self, ks: Ks, k: &[u8]) -> usize {
+    pub(crate) fn cell(&self, ks: KeySpace, k: &[u8]) -> usize {
         self.ks(ks).cell(k)
     }
 
-    pub(crate) fn range_cell(&self, ks: Ks, from_included: &[u8], to_included: &[u8]) -> usize {
+    pub(crate) fn range_cell(
+        &self,
+        ks: KeySpace,
+        from_included: &[u8],
+        to_included: &[u8],
+    ) -> usize {
         self.ks(ks).range_cell(from_included, to_included)
     }
 
-    fn ks(&self, ks: Ks) -> &KeySpace {
+    fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
         self.key_spaces
             .get(ks.0 as usize)
             .expect("Key space not found")

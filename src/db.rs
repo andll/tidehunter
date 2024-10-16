@@ -5,7 +5,7 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
-use crate::key_shape::{KeyShape, Ks};
+use crate::key_shape::{KeyShape, KeySpace};
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
@@ -150,7 +150,7 @@ impl Db {
         Ok((last_written_left, control_region))
     }
 
-    pub fn insert(&self, ks: Ks, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
+    pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         let v = v.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
@@ -162,7 +162,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn remove(&self, ks: Ks, k: impl Into<Bytes>) -> DbResult<()> {
+    pub fn remove(&self, ks: KeySpace, k: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
         let w = PreparedWalWrite::new(&WalEntry::Remove(ks, k.clone()));
@@ -171,7 +171,7 @@ impl Db {
         Ok(self.large_table.read().remove(cell, k, position, self)?)
     }
 
-    pub fn get(&self, ks: Ks, k: &[u8]) -> DbResult<Option<Bytes>> {
+    pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
         let cell = self.key_shape.cell(ks, &k);
         let Some(position) = self.large_table.read().get(cell, k, self)? else {
             return Ok(None);
@@ -180,7 +180,7 @@ impl Db {
         Ok(Some(value))
     }
 
-    pub fn exists(&self, ks: Ks, k: &[u8]) -> DbResult<bool> {
+    pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
         let cell = self.key_shape.cell(ks, &k);
         Ok(self.large_table.read().get(cell, k, self)?.is_some())
     }
@@ -223,7 +223,7 @@ impl Db {
     /// otherwise this function panics.
     pub fn range_ordered_iterator(
         self: &Arc<Self>,
-        ks: Ks,
+        ks: KeySpace,
         range: Range<Bytes>,
     ) -> RangeOrderedIterator {
         // todo (fix) technically with Range<Bytes> end of the range is exclusive
@@ -237,7 +237,7 @@ impl Db {
     /// otherwise this function panics.
     pub fn last_in_range(
         &self,
-        ks: Ks,
+        ks: KeySpace,
         from_included: &Bytes,
         to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
@@ -310,7 +310,7 @@ impl Db {
 
     fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
         let entry = Self::read_entry_unmapped(&self.wal, position)?;
-        if let WalEntry::Record(Ks(_), wal_key, v) = entry {
+        if let WalEntry::Record(KeySpace(_), wal_key, v) = entry {
             debug_assert_eq!(wal_key.as_ref(), k);
             Ok(v)
         } else {
@@ -483,9 +483,9 @@ impl Loader for Db {
 }
 
 pub(crate) enum WalEntry {
-    Record(Ks, Bytes, Bytes),
+    Record(KeySpace, Bytes, Bytes),
     Index(Bytes),
-    Remove(Ks, Bytes),
+    Remove(KeySpace, Bytes),
 }
 
 #[derive(Debug)]
@@ -506,7 +506,7 @@ impl WalEntry {
         let entry_type = b.get_u8();
         match entry_type {
             WalEntry::WAL_ENTRY_RECORD => {
-                let ks = Ks(b.get_u8());
+                let ks = KeySpace(b.get_u8());
                 let key_len = b.get_u16() as usize;
                 let k = bytes.slice(4..4 + key_len);
                 let v = bytes.slice(4 + key_len..);
@@ -514,7 +514,7 @@ impl WalEntry {
             }
             WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(1..)),
             WalEntry::WAL_ENTRY_REMOVE => {
-                let ks = Ks(b.get_u8());
+                let ks = KeySpace(b.get_u8());
                 WalEntry::Remove(ks, bytes.slice(2..))
             }
             _ => panic!("Unknown wal entry type {entry_type}"),
@@ -525,9 +525,9 @@ impl WalEntry {
 impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
-            WalEntry::Record(Ks(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
+            WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
             WalEntry::Index(index) => 1 + index.len(),
-            WalEntry::Remove(Ks(_), k) => 1 + 1 + k.len(),
+            WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
         }
     }
 
@@ -950,7 +950,7 @@ mod test {
         let config = Arc::new(config);
         let (key_shape, ks) = KeyShape::new_whole(&config);
         #[track_caller]
-        fn check_all(db: &Db, ks: Ks, last: u8) {
+        fn check_all(db: &Db, ks: KeySpace, last: u8) {
             for i in 5u8..=last {
                 assert_eq!(db.get(ks, &[1, 2, 3, 4, i]).unwrap(), Some(vec![i].into()));
             }
