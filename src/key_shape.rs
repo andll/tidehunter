@@ -25,7 +25,7 @@ struct KeySpaceDesc {
 }
 
 #[derive(Default, Clone)]
-struct KeySpaceConfig {
+pub struct KeySpaceConfig {
     key_offset: usize,
 }
 
@@ -41,7 +41,11 @@ impl KeyShapeBuilder {
         }
     }
 
-    pub fn const_key_space(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn const_key_space(&mut self, size: usize) -> KeySpace {
+        self.const_key_space_config(size, KeySpaceConfig::default())
+    }
+
+    pub fn const_key_space_config(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
         assert!(size > 0, "Key space size should be greater then 0");
         assert!(
             size + self.const_spaces <= self.large_table_size,
@@ -57,7 +61,11 @@ impl KeyShapeBuilder {
         self.add_key_space(KeySpaceDesc { range, config })
     }
 
-    pub fn frac_key_space(&mut self, frac: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn frac_key_space(&mut self, frac: usize) -> KeySpace {
+        self.frac_key_space_config(frac, KeySpaceConfig::default())
+    }
+
+    pub fn frac_key_space_config(&mut self, frac: usize, config: KeySpaceConfig) -> KeySpace {
         assert!(frac > 0, "Key space size should be greater then 0");
         assert!(
             frac + self.frac_spaces <= self.frac_base,
