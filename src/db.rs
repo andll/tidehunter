@@ -161,8 +161,8 @@ impl Db {
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        let cell = self.key_shape.cell(ks, &k);
-        self.large_table.read().insert(cell, k, position, self)?;
+        let ks = self.key_shape.ks(ks);
+        self.large_table.read().insert(ks, k, position, self)?;
         Ok(())
     }
 
@@ -204,8 +204,8 @@ impl Db {
                 .with_label_values(&["record"])
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
-            let cell = self.key_shape.cell(ks, &k);
-            lock.insert(cell, k, position, self)?;
+            let ks = self.key_shape.ks(ks);
+            lock.insert(ks, k, position, self)?;
             last_position = position;
         }
 
@@ -347,8 +347,8 @@ impl Db {
             match entry {
                 WalEntry::Record(ks, k, _v) => {
                     metrics.replayed_wal_records.inc();
-                    let cell = key_shape.cell(ks, &k);
-                    large_table.insert(cell, k, position, wal_iterator.wal())?;
+                    let ks = key_shape.ks(ks);
+                    large_table.insert(ks, k, position, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_bytes) => {
                     // todo - handle this by updating large table to Loaded()

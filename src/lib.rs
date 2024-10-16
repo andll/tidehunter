@@ -11,4 +11,6 @@ pub mod metrics;
 mod primitives;
 #[cfg(feature = "stress")]
 mod stress;
-mod wal;
+pub mod wal;
+
+pub use minibytes;

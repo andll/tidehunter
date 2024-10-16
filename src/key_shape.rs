@@ -1,7 +1,11 @@
 use crate::config::Config;
 use crate::large_table::LARGE_TABLE_MUTEXES;
+use crate::wal::WalPosition;
+use minibytes::Bytes;
 use std::cmp;
+use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct KeyShape {
@@ -20,7 +24,7 @@ pub struct KeyShapeBuilder {
 pub struct KeySpace(pub(crate) u8);
 
 #[derive(Clone)]
-struct KeySpaceDesc {
+pub(crate) struct KeySpaceDesc {
     range: Range<usize>,
     config: KeySpaceConfig,
 }
@@ -28,7 +32,12 @@ struct KeySpaceDesc {
 #[derive(Default, Clone)]
 pub struct KeySpaceConfig {
     key_offset: usize,
+    compactor: Option<Arc<Compactor>>,
 }
+
+// todo - we want better compactor API that does not expose too much internal details
+// todo - make mod wal private
+pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, WalPosition>) + Sync + Send>;
 
 impl KeyShapeBuilder {
     pub fn from_config(config: &Config, frac_base: usize) -> Self {
@@ -161,6 +170,10 @@ impl KeySpaceDesc {
             panic!("Can't have ordered iterator over key range that does not fit same large table cell");
         }
     }
+
+    pub(crate) fn compactor(&self) -> Option<&Compactor> {
+        self.config.compactor.as_ref().map(Arc::as_ref)
+    }
 }
 
 impl KeySpaceConfig {
@@ -169,7 +182,15 @@ impl KeySpaceConfig {
     }
 
     pub fn new_with_key_offset(key_offset: usize) -> Self {
-        Self { key_offset }
+        Self {
+            key_offset,
+            compactor: None,
+        }
+    }
+
+    pub fn with_compactor(mut self, compactor: Compactor) -> Self {
+        self.compactor = Some(Arc::new(compactor));
+        self
     }
 }
 
@@ -202,7 +223,7 @@ impl KeyShape {
         ks.range.clone()
     }
 
-    fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
+    pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
         let Some(key_space) = self.key_spaces.get(ks.0 as usize) else {
             panic!("Key space {} not found", ks.0)
         };

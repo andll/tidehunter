@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::index_table::IndexTable;
+use crate::key_shape::KeySpaceDesc;
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
@@ -121,17 +122,18 @@ impl LargeTable {
 
     pub fn insert<L: Loader>(
         &self,
-        cell: usize,
+        ks: &KeySpaceDesc,
         k: Bytes,
         v: WalPosition,
         loader: &L,
     ) -> Result<(), L::Error> {
+        let cell = ks.cell(&k);
         let (mut row, offset) = self.row(cell);
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
-            entry.unload(loader, &self.config, &self.metrics)?;
+            entry.unload(ks, loader, &self.config, &self.metrics)?;
         }
         self.metrics
             .max_index_size
@@ -534,6 +536,7 @@ impl LargeTableEntry {
 
     pub fn unload<L: Loader>(
         &mut self,
+        ks: &KeySpaceDesc,
         loader: &L,
         config: &Config,
         metrics: &Metrics,
@@ -554,10 +557,7 @@ impl LargeTableEntry {
                     self.state,
                     LargeTableEntryState::DirtyLoaded(_, _)
                 ));
-                // small code duplicate between here and unload_flush
-                let position = loader.unload(&self.data)?;
-                self.state = LargeTableEntryState::Unloaded(position);
-                self.data = Default::default();
+                self.unload_dirty_loaded(ks, loader)?;
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
@@ -565,9 +565,7 @@ impl LargeTableEntry {
                     metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
-                    let position = loader.unload(&self.data)?;
-                    self.state = LargeTableEntryState::Unloaded(position);
-                    self.data = Default::default();
+                    self.unload_dirty_loaded(ks, loader)?;
                 } else {
                     metrics.unload.with_label_values(&["unmerge"]).inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
@@ -586,6 +584,22 @@ impl LargeTableEntry {
         //     self.state = LargeTableEntryState::Unloaded(position);
         //     self.data.clear();
         // }
+        Ok(())
+    }
+
+    fn unload_dirty_loaded<L: Loader>(
+        &mut self,
+        // metrics: &Metrics,
+        ks: &KeySpaceDesc,
+        loader: &L,
+    ) -> Result<(), L::Error> {
+        if let Some(compactor) = ks.compactor() {
+            // metrics.compacted_keys.with_label_values()
+            compactor(&mut self.data.make_mut().data);
+        }
+        let position = loader.unload(&self.data)?;
+        self.state = LargeTableEntryState::Unloaded(position);
+        self.data = Default::default();
         Ok(())
     }
 

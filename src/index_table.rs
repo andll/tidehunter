@@ -8,7 +8,7 @@ use std::ops::RangeInclusive;
 pub(crate) struct IndexTable {
     // todo instead of loading entire BTreeMap in memory we should be able
     // to load parts of it from disk
-    data: BTreeMap<Bytes, WalPosition>,
+    pub(crate) data: BTreeMap<Bytes, WalPosition>,
 }
 
 impl IndexTable {

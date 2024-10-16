@@ -14,6 +14,7 @@ pub struct Metrics {
     pub wal_written_bytes_type: IntCounterVec,
     pub unload: IntCounterVec,
     pub entry_state: IntGaugeVec,
+    pub compacted_keys: IntCounterVec,
     // pub loaded_keys_total: IntGauge,
     // pub loaded_keys_total_bytes: IntGauge,
 }
@@ -56,6 +57,7 @@ impl Metrics {
             wal_written_bytes_type: counter_vec!("wal_written_bytes_type", &["type"], registry),
             unload: counter_vec!("unload", &["kind"], registry),
             entry_state: gauge_vec!("entry_state", &["state"], registry),
+            compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
             // loaded_keys_total: gauge!("loaded_keys_total", registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
