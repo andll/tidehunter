@@ -5,7 +5,7 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
-use crate::key_shape::KeyShape;
+use crate::key_shape::{KeyShape, Ks};
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
@@ -38,8 +38,12 @@ pub type DbResult<T> = Result<T, DbError>;
 pub const MAX_KEY_LEN: usize = u16::MAX as usize;
 
 impl Db {
-    pub fn open(path: &Path, config: Arc<Config>, metrics: Arc<Metrics>) -> DbResult<Self> {
-        let key_shape = KeyShape::from_config(&config);
+    pub fn open(
+        path: &Path,
+        key_shape: KeyShape,
+        config: Arc<Config>,
+        metrics: Arc<Metrics>,
+    ) -> DbResult<Self> {
         let cr = OpenOptions::new()
             .read(true)
             .write(true)
@@ -146,29 +150,29 @@ impl Db {
         Ok((last_written_left, control_region))
     }
 
-    pub fn insert(&self, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
+    pub fn insert(&self, ks: Ks, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         let v = v.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let w = PreparedWalWrite::new(&WalEntry::Record(k.clone(), v));
+        let w = PreparedWalWrite::new(&WalEntry::Record(ks, k.clone(), v));
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        let cell = self.key_shape.cell(&k);
+        let cell = self.key_shape.cell(ks, &k);
         self.large_table.read().insert(cell, k, position, self)?;
         Ok(())
     }
 
-    pub fn remove(&self, k: impl Into<Bytes>) -> DbResult<()> {
+    pub fn remove(&self, ks: Ks, k: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let w = PreparedWalWrite::new(&WalEntry::Remove(k.clone()));
+        let w = PreparedWalWrite::new(&WalEntry::Remove(ks, k.clone()));
         let position = self.wal_writer.write(&w)?;
-        let cell = self.key_shape.cell(&k);
+        let cell = self.key_shape.cell(ks, &k);
         Ok(self.large_table.read().remove(cell, k, position, self)?)
     }
 
-    pub fn get(&self, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let cell = self.key_shape.cell(&k);
+    pub fn get(&self, ks: Ks, k: &[u8]) -> DbResult<Option<Bytes>> {
+        let cell = self.key_shape.cell(ks, &k);
         let Some(position) = self.large_table.read().get(cell, k, self)? else {
             return Ok(None);
         };
@@ -176,8 +180,8 @@ impl Db {
         Ok(Some(value))
     }
 
-    pub fn exists(&self, k: &[u8]) -> DbResult<bool> {
-        let cell = self.key_shape.cell(&k);
+    pub fn exists(&self, ks: Ks, k: &[u8]) -> DbResult<bool> {
+        let cell = self.key_shape.cell(ks, &k);
         Ok(self.large_table.read().get(cell, k, self)?.is_some())
     }
 
@@ -186,16 +190,16 @@ impl Db {
         let lock = self.large_table.read();
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
-        for (k, w) in writes {
+        for (ks, k, w) in writes {
             let position = self.wal_writer.write(&w)?;
-            let cell = self.key_shape.cell(&k);
+            let cell = self.key_shape.cell(ks, &k);
             lock.insert(cell, k, position, self)?;
             last_position = position;
         }
 
-        for (k, w) in deletes {
+        for (ks, k, w) in deletes {
             let position = self.wal_writer.write(&w)?;
-            let cell = self.key_shape.cell(&k);
+            let cell = self.key_shape.cell(ks, &k);
             lock.remove(cell, k, position, self)?;
             last_position = position;
         }
@@ -217,9 +221,13 @@ impl Db {
     ///
     /// Both start and end of the range should have the same first 4 bytes,
     /// otherwise this function panics.
-    pub fn range_ordered_iterator(self: &Arc<Self>, range: Range<Bytes>) -> RangeOrderedIterator {
+    pub fn range_ordered_iterator(
+        self: &Arc<Self>,
+        ks: Ks,
+        range: Range<Bytes>,
+    ) -> RangeOrderedIterator {
         // todo (fix) technically with Range<Bytes> end of the range is exclusive
-        let cell = self.key_shape.range_cell(&range.start, &range.end);
+        let cell = self.key_shape.range_cell(ks, &range.start, &range.end);
         RangeOrderedIterator::new(self.clone(), cell, range)
     }
 
@@ -229,10 +237,11 @@ impl Db {
     /// otherwise this function panics.
     pub fn last_in_range(
         &self,
+        ks: Ks,
         from_included: &Bytes,
         to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
-        let cell = self.key_shape.range_cell(from_included, to_included);
+        let cell = self.key_shape.range_cell(ks, from_included, to_included);
         let Some((key, position)) =
             self.large_table
                 .read()
@@ -301,7 +310,7 @@ impl Db {
 
     fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
         let entry = Self::read_entry_unmapped(&self.wal, position)?;
-        if let WalEntry::Record(wal_key, v) = entry {
+        if let WalEntry::Record(Ks(_), wal_key, v) = entry {
             debug_assert_eq!(wal_key.as_ref(), k);
             Ok(v)
         } else {
@@ -323,17 +332,17 @@ impl Db {
             let (position, entry) = entry?;
             let entry = WalEntry::from_bytes(entry);
             match entry {
-                WalEntry::Record(k, _v) => {
+                WalEntry::Record(ks, k, _v) => {
                     metrics.replayed_wal_records.inc();
-                    let cell = key_shape.cell(&k);
+                    let cell = key_shape.cell(ks, &k);
                     large_table.insert(cell, k, position, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
-                WalEntry::Remove(k) => {
+                WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
-                    let cell = key_shape.cell(&k);
+                    let cell = key_shape.cell(ks, &k);
                     large_table.remove(cell, k, position, wal_iterator.wal())?;
                 }
             }
@@ -474,9 +483,9 @@ impl Loader for Db {
 }
 
 pub(crate) enum WalEntry {
-    Record(Bytes, Bytes),
+    Record(Ks, Bytes, Bytes),
     Index(Bytes),
-    Remove(Bytes),
+    Remove(Ks, Bytes),
 }
 
 #[derive(Debug)]
@@ -488,22 +497,26 @@ pub enum DbError {
 }
 
 impl WalEntry {
-    const WAL_ENTRY_RECORD: u16 = 1;
-    const WAL_ENTRY_INDEX: u16 = 2;
-    const WAL_ENTRY_REMOVE: u16 = 3;
+    const WAL_ENTRY_RECORD: u8 = 1;
+    const WAL_ENTRY_INDEX: u8 = 2;
+    const WAL_ENTRY_REMOVE: u8 = 3;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
         let mut b = &bytes[..];
-        let entry_type = b.get_u16();
+        let entry_type = b.get_u8();
         match entry_type {
             WalEntry::WAL_ENTRY_RECORD => {
+                let ks = Ks(b.get_u8());
                 let key_len = b.get_u16() as usize;
                 let k = bytes.slice(4..4 + key_len);
                 let v = bytes.slice(4 + key_len..);
-                WalEntry::Record(k, v)
+                WalEntry::Record(ks, k, v)
             }
-            WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(2..)),
-            WalEntry::WAL_ENTRY_REMOVE => WalEntry::Remove(bytes.slice(2..)),
+            WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(1..)),
+            WalEntry::WAL_ENTRY_REMOVE => {
+                let ks = Ks(b.get_u8());
+                WalEntry::Remove(ks, bytes.slice(2..))
+            }
             _ => panic!("Unknown wal entry type {entry_type}"),
         }
     }
@@ -512,27 +525,29 @@ impl WalEntry {
 impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
-            WalEntry::Record(k, v) => 4 + k.len() + v.len(),
-            WalEntry::Index(index) => 2 + index.len(),
-            WalEntry::Remove(k) => 2 + k.len(),
+            WalEntry::Record(Ks(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
+            WalEntry::Index(index) => 1 + index.len(),
+            WalEntry::Remove(Ks(_), k) => 1 + 1 + k.len(),
         }
     }
 
     fn write_into_bytes(&self, buf: &mut BytesMut) {
         // todo avoid copy here
         match self {
-            WalEntry::Record(k, v) => {
-                buf.put_u16(Self::WAL_ENTRY_RECORD);
+            WalEntry::Record(ks, k, v) => {
+                buf.put_u8(Self::WAL_ENTRY_RECORD);
+                buf.put_u8(ks.0);
                 buf.put_u16(k.len() as u16);
                 buf.put_slice(&k);
                 buf.put_slice(&v);
             }
             WalEntry::Index(bytes) => {
-                buf.put_u16(Self::WAL_ENTRY_INDEX);
+                buf.put_u8(Self::WAL_ENTRY_INDEX);
                 buf.put_slice(&bytes);
             }
-            WalEntry::Remove(k) => {
-                buf.put_u16(Self::WAL_ENTRY_REMOVE);
+            WalEntry::Remove(ks, k) => {
+                buf.put_u8(Self::WAL_ENTRY_REMOVE);
+                buf.put_u8(ks.0);
                 buf.put_slice(&k)
             }
         }
@@ -566,17 +581,30 @@ mod test {
     fn db_test() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
-            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
             db.rebuild_control_region().unwrap();
             assert!(
                 db.large_table.read().is_all_clean(),
@@ -585,26 +613,44 @@ mod test {
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                metrics.clone(),
+            )
+            .unwrap();
             // nothing replayed from wal since we just rebuilt the control region
             assert_eq!(metrics.replayed_wal_records.get(), 0);
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
-            db.insert(vec![3, 4, 5, 6], vec![8]).unwrap();
-            assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+            db.insert(ks, vec![3, 4, 5, 6], vec![8]).unwrap();
+            assert_eq!(Some(vec![8].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                metrics.clone(),
+            )
+            .unwrap();
             assert_eq!(metrics.replayed_wal_records.get(), 1);
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![8].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![8].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), config.clone(), Metrics::new().clone()).unwrap();
-            db.insert(vec![3, 4, 5, 6], vec![9]).unwrap();
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![9].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new().clone(),
+            )
+            .unwrap();
+            db.insert(ks, vec![3, 4, 5, 6], vec![9]).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![9].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         }
     }
 
@@ -612,45 +658,65 @@ mod test {
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Arc::new(Config::small());
-        let db = Db::open(dir.path(), config, Metrics::new()).unwrap();
+        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
-        batch.write(vec![5, 6, 7, 8], vec![15]);
-        batch.write(vec![6, 7, 8, 9], vec![17]);
+        batch.write(ks, vec![5, 6, 7, 8], vec![15]);
+        batch.write(ks, vec![6, 7, 8, 9], vec![17]);
         db.write_batch(batch).unwrap();
-        assert_eq!(Some(vec![15].into()), db.get(&[5, 6, 7, 8]).unwrap());
-        assert_eq!(Some(vec![17].into()), db.get(&[6, 7, 8, 9]).unwrap());
+        assert_eq!(Some(vec![15].into()), db.get(ks, &[5, 6, 7, 8]).unwrap());
+        assert_eq!(Some(vec![17].into()), db.get(ks, &[6, 7, 8, 9]).unwrap());
     }
 
     #[test]
     fn test_remove() {
         let dir = tempdir::TempDir::new("test-remove").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
-            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
-            assert_eq!(Some(vec![5, 6].into()), db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
-            db.remove(vec![1, 2, 3, 4]).unwrap();
-            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
-            db.remove(vec![1, 2, 3, 4]).unwrap();
-            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+            assert_eq!(Some(vec![5, 6].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+            db.remove(ks, vec![1, 2, 3, 4]).unwrap();
+            assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+            db.remove(ks, vec![1, 2, 3, 4]).unwrap();
+            assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
         }
         {
-            let db = Db::open(dir.path(), config.clone(), Metrics::new()).unwrap();
-            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
-            db.insert(vec![1, 2, 3, 4], vec![9, 10]).unwrap();
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
-            assert_eq!(Some(vec![9, 10].into()), db.get(&[1, 2, 3, 4]).unwrap());
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
+            assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+            db.insert(ks, vec![1, 2, 3, 4], vec![9, 10]).unwrap();
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
+            assert_eq!(Some(vec![9, 10].into()), db.get(ks, &[1, 2, 3, 4]).unwrap());
             db.rebuild_control_region().unwrap();
-            db.remove(vec![1, 2, 3, 4]).unwrap();
+            db.remove(ks, vec![1, 2, 3, 4]).unwrap();
         }
         {
             let metrics = Metrics::new();
-            let db = Db::open(dir.path(), config.clone(), metrics.clone()).unwrap();
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                metrics.clone(),
+            )
+            .unwrap();
             assert_eq!(metrics.replayed_wal_records.get(), 1);
-            assert_eq!(None, db.get(&[1, 2, 3, 4]).unwrap());
-            assert_eq!(Some(vec![7].into()), db.get(&[3, 4, 5, 6]).unwrap());
+            assert_eq!(None, db.get(ks, &[1, 2, 3, 4]).unwrap());
+            assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
         }
     }
 
@@ -658,12 +724,21 @@ mod test {
     fn test_unordered_iterator() {
         let dir = tempdir::TempDir::new("test-unordered-iterator").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             let mut it = db.unordered_iterator();
             assert!(it.next().is_none());
-            db.insert(vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
+            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
             let it = db.unordered_iterator();
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
@@ -672,7 +747,15 @@ mod test {
             assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             let it = db.unordered_iterator();
             let s: DbResult<HashSet<_>> = it.collect();
             let s = s.unwrap();
@@ -686,16 +769,27 @@ mod test {
     fn test_ordered_iterator() {
         let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             let mut it = db.unordered_iterator();
             assert!(it.next().is_none());
-            db.insert(vec![1, 2, 3, 4, 6], vec![1]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 5], vec![2]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 10], vec![3]).unwrap();
-            db.insert(vec![3, 4, 5, 6], vec![7]).unwrap();
-            let it =
-                db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
+            db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
+            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+            let it = db.range_ordered_iterator(
+                ks,
+                vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into(),
+            );
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
             assert_eq!(v.len(), 2);
@@ -709,9 +803,19 @@ mod test {
             );
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            let it =
-                db.range_ordered_iterator(vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            let it = db.range_ordered_iterator(
+                ks,
+                vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into(),
+            );
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
             assert_eq!(v.len(), 2);
@@ -730,14 +834,31 @@ mod test {
     fn test_empty() {
         let dir = tempdir::TempDir::new("test-empty").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             assert!(db.is_empty());
-            db.insert(vec![1, 2, 3, 4, 0], vec![1]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 0], vec![1]).unwrap();
             assert!(!db.is_empty());
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             assert!(!db.is_empty());
         }
     }
@@ -746,20 +867,37 @@ mod test {
     fn test_small_keys() {
         let dir = tempdir::TempDir::new("test-small-keys").unwrap();
         let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            db.insert(vec![], vec![1]).unwrap();
-            db.insert(vec![1], vec![2]).unwrap();
-            db.insert(vec![1, 2], vec![3]).unwrap();
-            assert_eq!(db.get(&[]).unwrap(), Some(vec![1].into()));
-            assert_eq!(db.get(&[1]).unwrap(), Some(vec![2].into()));
-            assert_eq!(db.get(&[1, 2]).unwrap(), Some(vec![3].into()));
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            db.insert(ks, vec![], vec![1]).unwrap();
+            db.insert(ks, vec![1], vec![2]).unwrap();
+            db.insert(ks, vec![1, 2], vec![3]).unwrap();
+            assert_eq!(db.get(ks, &[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(ks, &[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(ks, &[1, 2]).unwrap(), Some(vec![3].into()));
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            assert_eq!(db.get(&[]).unwrap(), Some(vec![1].into()));
-            assert_eq!(db.get(&[1]).unwrap(), Some(vec![2].into()));
-            assert_eq!(db.get(&[1, 2]).unwrap(), Some(vec![3].into()));
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            assert_eq!(db.get(ks, &[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(ks, &[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(ks, &[1, 2]).unwrap(), Some(vec![3].into()));
         }
     }
 
@@ -767,27 +905,36 @@ mod test {
     fn test_last_in_range() {
         let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
         let config = Arc::new(Config::small());
-        let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-        db.insert(vec![1, 2, 3, 4, 6], vec![1]).unwrap();
-        db.insert(vec![1, 2, 3, 4, 5], vec![2]).unwrap();
-        db.insert(vec![1, 2, 3, 4, 10], vec![3]).unwrap();
+        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let db = Arc::new(
+            Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap(),
+        );
+        db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
+        db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
+        db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
         assert_eq!(
-            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 8].into())
+            db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 8].into())
                 .unwrap(),
             Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
         );
         assert_eq!(
-            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 6].into())
+            db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 6].into())
                 .unwrap(),
             Some((vec![1, 2, 3, 4, 6].into(), vec![1].into()))
         );
         assert_eq!(
-            db.last_in_range(&vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 5].into())
+            db.last_in_range(ks, &vec![1, 2, 3, 4, 5].into(), &vec![1, 2, 3, 4, 5].into())
                 .unwrap(),
             Some((vec![1, 2, 3, 4, 5].into(), vec![2].into()))
         );
         assert_eq!(
-            db.last_in_range(&vec![1, 2, 3, 4, 4].into(), &vec![1, 2, 3, 4, 4].into())
+            db.last_in_range(ks, &vec![1, 2, 3, 4, 4].into(), &vec![1, 2, 3, 4, 4].into())
                 .unwrap(),
             None
         );
@@ -801,10 +948,11 @@ mod test {
         config.max_loaded_entries = 1;
         config.large_table_size = 2 * crate::large_table::LARGE_TABLE_MUTEXES;
         let config = Arc::new(config);
+        let (key_shape, ks) = KeyShape::new_whole(&config);
         #[track_caller]
-        fn check_all(db: &Db, last: u8) {
+        fn check_all(db: &Db, ks: Ks, last: u8) {
             for i in 5u8..=last {
-                assert_eq!(db.get(&[1, 2, 3, 4, i]).unwrap(), Some(vec![i].into()));
+                assert_eq!(db.get(ks, &[1, 2, 3, 4, i]).unwrap(), Some(vec![i].into()));
             }
         }
         #[track_caller]
@@ -854,10 +1002,18 @@ mod test {
         }
         let other_key = vec![1, 6, 3, 4, 5];
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
             {
-                let (mutex1, cell1) = LargeTable::locate(db.key_shape.cell(&other_key));
-                let (mutex2, cell2) = LargeTable::locate(db.key_shape.cell(&[1, 2, 3, 4, 5]));
+                let (mutex1, cell1) = LargeTable::locate(db.key_shape.cell(ks, &other_key));
+                let (mutex2, cell2) = LargeTable::locate(db.key_shape.cell(ks, &[1, 2, 3, 4, 5]));
                 assert_eq!(mutex1, mutex2);
                 assert_ne!(cell1, cell2);
                 // code below is needed to search for other_key
@@ -872,44 +1028,68 @@ mod test {
                 // }
             }
 
-            db.insert(other_key.clone(), vec![5]).unwrap(); // fill one
-            db.insert(vec![1, 2, 3, 4, 5], vec![5]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 6], vec![6]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 7], vec![7]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 8], vec![8]).unwrap();
+            db.insert(ks, other_key.clone(), vec![5]).unwrap(); // fill one
+            db.insert(ks, vec![1, 2, 3, 4, 5], vec![5]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 6], vec![6]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 7], vec![7]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 8], vec![8]).unwrap();
             check_metrics(&db.metrics, 0, 1, 0, 0);
-            db.insert(vec![1, 2, 3, 4, 9], vec![9]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 10], vec![10]).unwrap();
-            check_all(&db, 10);
+            db.insert(ks, vec![1, 2, 3, 4, 9], vec![9]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 10], vec![10]).unwrap();
+            check_all(&db, ks, 10);
             check_metrics(&db.metrics, 0, 1, 1, 0);
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            check_all(&db, 10);
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            check_all(&db, ks, 10);
             check_metrics(&db.metrics, 0, 0, 0, 0);
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            db.insert(vec![1, 2, 3, 4, 11], vec![11]).unwrap();
-            db.insert(vec![1, 2, 3, 4, 12], vec![12]).unwrap();
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            db.insert(ks, vec![1, 2, 3, 4, 11], vec![11]).unwrap();
+            db.insert(ks, vec![1, 2, 3, 4, 12], vec![12]).unwrap();
             check_metrics(&db.metrics, 0, 1, 0, 0);
-            check_all(&db, 12);
-            db.insert(vec![1, 2, 3, 4, 13], vec![13]).unwrap();
-            db.get(&other_key).unwrap().unwrap();
+            check_all(&db, ks, 12);
+            db.insert(ks, vec![1, 2, 3, 4, 13], vec![13]).unwrap();
+            db.get(ks, &other_key).unwrap().unwrap();
             check_metrics(&db.metrics, 0, 1, 0, 0);
             // todo - uncomment when unloading on get is implemented
             // check_metrics(&db.metrics, 1, 1, 0, 0);
         }
         {
-            let db = Arc::new(Db::open(dir.path(), config.clone(), Metrics::new()).unwrap());
-            check_all(&db, 13);
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            check_all(&db, ks, 13);
             check_metrics(&db.metrics, 0, 0, 0, 0);
             db.rebuild_control_region().unwrap(); // this puts all entries into clean state
             assert!(
                 db.large_table.read().is_all_clean(),
                 "Some entries are not clean after snapshot"
             );
-            db.get(&other_key).unwrap().unwrap();
+            db.get(ks, &other_key).unwrap().unwrap();
             check_metrics(&db.metrics, 0, 0, 0, 0);
             // todo - uncomment when unloading on get is implemented
             // check_metrics(&db.metrics, 0, 0, 0, 1);

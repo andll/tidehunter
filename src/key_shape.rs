@@ -2,16 +2,18 @@ use crate::config::Config;
 use std::cmp;
 use std::ops::Range;
 
+#[derive(Clone)]
 pub struct KeyShape {
-    large_table_size: usize,
+    key_spaces: Vec<KeySpace>,
 }
 
+#[derive(Clone)]
 pub struct KeySpace {
     range: Range<usize>,
     config: KeySpaceConfig,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct KeySpaceConfig {
     key_offset: usize,
 }
@@ -21,7 +23,11 @@ pub struct KeySpaceBuilder {
     frac_base: usize,
     const_spaces: usize,
     frac_spaces: usize,
+    key_spaces: Vec<KeySpace>,
 }
+
+#[derive(Clone, Copy)]
+pub struct Ks(pub(crate) u8);
 
 impl KeySpaceBuilder {
     pub fn from_config(config: &Config, frac_base: usize) -> Self {
@@ -31,10 +37,11 @@ impl KeySpaceBuilder {
             const_spaces: 0,
             frac_spaces: 0,
             frac_base,
+            key_spaces: vec![],
         }
     }
 
-    pub fn const_key_space(&mut self, size: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn const_key_space(&mut self, size: usize, config: KeySpaceConfig) -> Ks {
         assert!(size > 0, "Key space size should be greater then 0");
         assert!(
             size + self.const_spaces <= self.large_table_size,
@@ -47,10 +54,10 @@ impl KeySpaceBuilder {
         let start = self.const_spaces;
         self.const_spaces += size;
         let range = start..self.const_spaces;
-        KeySpace { range, config }
+        self.add_key_space(KeySpace { range, config })
     }
 
-    pub fn frac_key_space(&mut self, frac: usize, config: KeySpaceConfig) -> KeySpace {
+    pub fn frac_key_space(&mut self, frac: usize, config: KeySpaceConfig) -> Ks {
         assert!(frac > 0, "Key space size should be greater then 0");
         assert!(
             frac + self.frac_spaces <= self.frac_base,
@@ -70,7 +77,23 @@ impl KeySpaceBuilder {
         self.frac_spaces += frac;
         let end = self.frac_spaces * per_frac;
         let range = start..end;
-        KeySpace { range, config }
+        self.add_key_space(KeySpace { range, config })
+    }
+
+    fn add_key_space(&mut self, key_space: KeySpace) -> Ks {
+        assert!(
+            self.key_spaces.len() < (u8::MAX - 1) as usize,
+            "Maximum {} key spaces allowed",
+            u8::MAX
+        );
+        self.key_spaces.push(key_space);
+        Ks(self.key_spaces.len() as u8)
+    }
+
+    pub fn build(self) -> KeyShape {
+        KeyShape {
+            key_spaces: self.key_spaces,
+        }
     }
 }
 impl KeySpace {
@@ -85,7 +108,11 @@ impl KeySpace {
     }
 
     fn cell_prefix(&self, k: &[u8]) -> u32 {
-        KeyShape::cell_prefix(&k[self.config.key_offset..])
+        let k = &k[self.config.key_offset..];
+        let copy = cmp::min(k.len(), 4);
+        let mut p = [0u8; 4];
+        p[..copy].copy_from_slice(&k[..copy]);
+        u32::from_le_bytes(p)
     }
 
     /// Returns the cell containing the range.
@@ -107,43 +134,32 @@ impl KeySpaceConfig {
     }
 
     pub fn new_with_key_offset(key_offset: usize) -> Self {
-        Self {
-            key_offset,
-        }
+        Self { key_offset }
     }
 }
 
 impl KeyShape {
-    pub fn from_config(config: &Config) -> Self {
-        let large_table_size = config.large_table_size();
-        Self { large_table_size }
+    pub fn new_whole(config: &Config) -> (Self, Ks) {
+        let key_space = KeySpace {
+            range: 0..config.large_table_size,
+            config: Default::default(),
+        };
+        let key_spaces = vec![key_space];
+        let this = Self { key_spaces };
+        (this, Ks(0))
     }
 
-    pub fn cell(&self, k: &[u8]) -> usize {
-        /* pub(crate) for tests */
-        self.cell_by_prefix(Self::cell_prefix(k))
+    pub(crate) fn cell(&self, ks: Ks, k: &[u8]) -> usize {
+        self.ks(ks).cell(k)
     }
 
-    fn cell_prefix(k: &[u8]) -> u32 {
-        let copy = cmp::min(k.len(), 4);
-        let mut p = [0u8; 4];
-        p[..copy].copy_from_slice(&k[..copy]);
-        u32::from_le_bytes(p)
+    pub(crate) fn range_cell(&self, ks: Ks, from_included: &[u8], to_included: &[u8]) -> usize {
+        self.ks(ks).range_cell(from_included, to_included)
     }
 
-    fn cell_by_prefix(&self, prefix: u32) -> usize {
-        (prefix as usize) % self.large_table_size
-    }
-
-    /// Returns the cell containing the range.
-    /// Right now, this only works if the entire range "fits" single cell.
-    pub fn range_cell(&self, from_included: &[u8], to_included: &[u8]) -> usize {
-        let start_prefix = Self::cell_prefix(&from_included);
-        let end_prefix = Self::cell_prefix(&to_included);
-        if start_prefix == end_prefix {
-            self.cell_by_prefix(start_prefix)
-        } else {
-            panic!("Can't have ordered iterator over key range that does not fit same large table cell");
-        }
+    fn ks(&self, ks: Ks) -> &KeySpace {
+        self.key_spaces
+            .get(ks.0 as usize)
+            .expect("Key space not found")
     }
 }

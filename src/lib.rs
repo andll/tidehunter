@@ -5,7 +5,7 @@ mod crc;
 pub mod db;
 mod index_table;
 pub mod iterators;
-mod key_shape;
+pub mod key_shape;
 mod large_table;
 pub mod metrics;
 mod primitives;
