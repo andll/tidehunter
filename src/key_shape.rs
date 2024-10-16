@@ -183,8 +183,9 @@ impl KeyShape {
     }
 
     fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
-        self.key_spaces
-            .get(ks.0 as usize)
-            .expect("Key space not found")
+        let Some(key_space) = self.key_spaces.get(ks.0 as usize) else {
+            panic!("Key space {} not found", ks.0)
+        };
+        key_space
     }
 }
