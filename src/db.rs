@@ -180,8 +180,8 @@ impl Db {
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
-        let cell = self.key_shape.cell(ks, &k);
-        let Some(position) = self.large_table.read().get(cell, k, self)? else {
+        let ks = self.key_shape.ks(ks);
+        let Some(position) = self.large_table.read().get(ks, k, self)? else {
             return Ok(None);
         };
         let value = self.read_record(k, position)?;
@@ -189,8 +189,8 @@ impl Db {
     }
 
     pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
-        let cell = self.key_shape.cell(ks, &k);
-        Ok(self.large_table.read().get(cell, k, self)?.is_some())
+        let ks = self.key_shape.ks(ks);
+        Ok(self.large_table.read().get(ks, k, self)?.is_some())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
@@ -1085,9 +1085,7 @@ mod test {
             check_all(&db, ks, 12);
             db.insert(ks, vec![1, 2, 3, 4, 13], vec![13]).unwrap();
             db.get(ks, &other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 0, 1, 0, 0);
-            // todo - uncomment when unloading on get is implemented
-            // check_metrics(&db.metrics, 1, 1, 0, 0);
+            check_metrics(&db.metrics, 1, 1, 0, 0);
         }
         {
             let db = Arc::new(
@@ -1107,9 +1105,7 @@ mod test {
                 "Some entries are not clean after snapshot"
             );
             db.get(ks, &other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 0, 0, 0, 0);
-            // todo - uncomment when unloading on get is implemented
-            // check_metrics(&db.metrics, 0, 0, 0, 1);
+            check_metrics(&db.metrics, 0, 0, 0, 1);
         }
     }
 }

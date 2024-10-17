@@ -134,6 +134,7 @@ impl LargeTable {
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
             entry.unload(ks, loader, &self.config, &self.metrics)?;
+            row.lru.remove(offset as u64);
         }
         self.metrics
             .max_index_size
@@ -175,12 +176,12 @@ impl LargeTable {
 
     pub fn get<L: Loader>(
         &self,
-        cell: usize,
+        ks: &KeySpaceDesc,
         k: &[u8],
         loader: &L,
     ) -> Result<Option<WalPosition>, L::Error> {
+        let cell = ks.cell(&k);
         let (mut row, offset) = self.row(cell);
-        row.lru.insert(offset as u64);
         let entry = row.entry_mut(offset);
         if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
             // optimization: in dirty unloaded state we might not need to load entry
@@ -191,7 +192,7 @@ impl LargeTable {
                 return Ok(found.valid());
             }
         }
-        let entry = self.load_entry(row, offset, loader)?;
+        let entry = self.load_entry(ks, row, offset, loader)?;
         Ok(entry.get(k))
     }
 
@@ -220,23 +221,24 @@ impl LargeTable {
 
     fn load_entry<'a, L: Loader>(
         &self,
+        ks: &KeySpaceDesc,
         mut row: MutexGuard<'a, Row>,
         offset: usize,
         loader: &L,
     ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
         row.lru.insert(offset as u64); // entry will be loaded so no need to check count_as_loaded
 
-        // if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
-        //     // todo - try to unload Loaded entry even if unload is not supported
-        //     let unload = row.lru.pop().expect("Lru is not empty");
-        //     assert_ne!(
-        //         unload, offset as u64,
-        //         "Attempting unload entry we are just trying to load"
-        //     );
-        //     // todo - we can try different approaches,
-        //     // for example prioritize unloading Loaded entries over Dirty entries
-        //     row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
-        // }
+        if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
+            // todo - try to unload Loaded entry even if unload is not supported
+            let unload = row.lru.pop().expect("Lru is not empty");
+            assert_ne!(
+                unload, offset as u64,
+                "Attempting unload entry we are just trying to load"
+            );
+            // todo - we can try different approaches,
+            // for example prioritize unloading Loaded entries over Dirty entries
+            row.data[unload as usize].unload(ks, loader, &self.config, &self.metrics)?;
+        }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
         Ok(entry)
