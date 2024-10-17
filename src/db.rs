@@ -1029,6 +1029,8 @@ mod test {
                 .unwrap(),
             );
             {
+                // todo this code predates KS api so we calculate cells manually
+                // todo rewrite with using ks API instead
                 let (mutex1, cell1) = LargeTable::locate(db.key_shape.cell(ks, &other_key));
                 let (mutex2, cell2) = LargeTable::locate(db.key_shape.cell(ks, &[1, 2, 3, 4, 5]));
                 assert_eq!(mutex1, mutex2);
