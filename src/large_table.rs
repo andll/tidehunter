@@ -593,6 +593,15 @@ impl LargeTableEntry {
         loader: &L,
         metrics: &Metrics,
     ) -> Result<(), L::Error> {
+        self.run_compactor(ks, metrics);
+        let position = loader.unload(&self.data)?;
+        self.state = LargeTableEntryState::Unloaded(position);
+        self.data = Default::default();
+        Ok(())
+    }
+
+    fn run_compactor(&mut self, ks: &KeySpaceDesc, metrics: &Metrics) {
+        // todo run compactor during snapshot
         if let Some(compactor) = ks.compactor() {
             let index = self.data.make_mut();
             let pre_compact_len = index.len();
@@ -603,10 +612,6 @@ impl LargeTableEntry {
                 .with_label_values(&[ks.name()])
                 .inc_by(compacted as u64);
         }
-        let position = loader.unload(&self.data)?;
-        self.state = LargeTableEntryState::Unloaded(position);
-        self.data = Default::default();
-        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
