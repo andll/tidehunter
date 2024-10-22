@@ -17,6 +17,7 @@ pub struct KeyShapeBuilder {
     frac_base: usize,
     const_spaces: usize,
     frac_spaces: usize,
+    const_space_pad: usize,
     key_spaces: Vec<KeySpaceDesc>,
 }
 
@@ -53,6 +54,7 @@ impl KeyShapeBuilder {
             const_spaces: 0,
             frac_spaces: 0,
             frac_base,
+            const_space_pad: 0,
             key_spaces: vec![],
         }
     }
@@ -64,7 +66,8 @@ impl KeyShapeBuilder {
     /// round up const_spaces to a multiple of LARGE_TABLE_MUTEXES and return const_space size
     pub fn pad_const_space(&mut self) -> usize {
         let b = (self.const_spaces + LARGE_TABLE_MUTEXES - 1) / LARGE_TABLE_MUTEXES;
-        b * LARGE_TABLE_MUTEXES
+        self.const_space_pad = b * LARGE_TABLE_MUTEXES;
+        self.const_space_pad
     }
 
     pub fn const_key_space_config(
@@ -144,7 +147,10 @@ impl KeyShapeBuilder {
         ks
     }
 
-    pub fn build(self) -> KeyShape {
+    pub fn build(mut self) -> KeyShape {
+        if self.const_space_pad > 0 {
+            self.const_key_space("pad", self.const_space_pad);
+        }
         self.check_no_overlap();
         KeyShape {
             key_spaces: self.key_spaces,
