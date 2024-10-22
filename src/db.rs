@@ -51,8 +51,12 @@ impl Db {
             .open(path.join("cr"))?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(&cr, &config)?;
-        let large_table =
-            LargeTable::from_unloaded(control_region.snapshot(), config.clone(), metrics.clone());
+        let large_table = LargeTable::from_unloaded(
+            &key_shape,
+            control_region.snapshot(),
+            config.clone(),
+            metrics.clone(),
+        );
         let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
@@ -322,13 +326,30 @@ impl Db {
     }
 
     fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
-        let entry = Self::read_entry_unmapped(&self.wal, position)?;
+        let entry = self.read_report_entry(position)?;
         if let WalEntry::Record(KeySpace(_), wal_key, v) = entry {
             debug_assert_eq!(wal_key.as_ref(), k);
             Ok(v)
         } else {
             panic!("Unexpected wal entry where expected record");
         }
+    }
+
+    fn report_read(&self, entry: &WalEntry, mapped: bool) {
+        let (kind, ks) = match entry {
+            WalEntry::Record(ks, _, _) => ("record", self.key_shape.ks(*ks).name()),
+            WalEntry::Index(ks, _) => ("index", self.key_shape.ks(*ks).name()),
+            WalEntry::Remove(ks, _) => ("tombstone", self.key_shape.ks(*ks).name()),
+        };
+        let mapped = if mapped { "mapped" } else { "unmapped" };
+        self.metrics
+            .read
+            .with_label_values(&[ks, kind, mapped])
+            .inc();
+        self.metrics
+            .read_bytes
+            .with_label_values(&[ks, kind, mapped])
+            .inc_by(entry.len() as u64);
     }
 
     fn replay_wal(
@@ -350,7 +371,7 @@ impl Db {
                     let ks = key_shape.ks(ks);
                     large_table.insert(ks, k, position, wal_iterator.wal())?;
                 }
-                WalEntry::Index(_bytes) => {
+                WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(ks, k) => {
@@ -387,15 +408,15 @@ impl Db {
                     index_updates.push(None);
                     Ok(pos)
                 }
-                LargeTableSnapshotEntry::Dirty(index) => {
-                    let position = self.write_index(&index)?;
+                LargeTableSnapshotEntry::Dirty(ks, index) => {
+                    let position = self.write_index(ks, &index)?;
                     index_updates.push(Some((index, position)));
                     Ok(position)
                 }
-                LargeTableSnapshotEntry::DirtyUnloaded(pos, index) => {
+                LargeTableSnapshotEntry::DirtyUnloaded(ks, pos, index) => {
                     let mut clean = self.load(pos)?;
                     clean.merge_dirty(&index);
-                    let position = self.write_index(&clean)?;
+                    let position = self.write_index(ks, &clean)?;
                     index_updates.push(Some((index, position)));
                     Ok(position)
                 }
@@ -405,10 +426,10 @@ impl Db {
         Ok(snapshot)
     }
 
-    fn write_index(&self, index: &IndexTable) -> DbResult<WalPosition> {
+    fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
         let index = bincode::serialize(index)?;
         let index = index.into();
-        let w = PreparedWalWrite::new(&WalEntry::Index(index));
+        let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
         self.metrics
             .wal_written_bytes_type
             .with_label_values(&["index"])
@@ -416,14 +437,24 @@ impl Db {
         Ok(self.wal_writer.write(&w)?)
     }
 
-    fn read_entry_mapped(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
-        let entry = wal.read(position)?;
-        Ok(WalEntry::from_bytes(entry))
+    fn read_entry(wal: &Wal, position: WalPosition) -> DbResult<(bool, WalEntry)> {
+        let (mapped, entry) = wal.read_unmapped(position)?;
+        Ok((mapped, WalEntry::from_bytes(entry)))
     }
 
-    fn read_entry_unmapped(wal: &Wal, position: WalPosition) -> DbResult<WalEntry> {
-        let entry = wal.read_unmapped(position)?;
-        Ok(WalEntry::from_bytes(entry))
+    fn read_report_entry(&self, position: WalPosition) -> DbResult<WalEntry> {
+        let (mapped, entry) = Self::read_entry(&self.wal, position)?;
+        self.report_read(&entry, mapped);
+        Ok(entry)
+    }
+
+    fn read_index(entry: WalEntry) -> DbResult<IndexTable> {
+        if let WalEntry::Index(_, bytes) = entry {
+            let entry = bincode::deserialize(&bytes)?;
+            Ok(entry)
+        } else {
+            panic!("Unexpected wal entry where expected record");
+        }
     }
 }
 
@@ -465,20 +496,15 @@ impl Loader for Wal {
     type Error = DbError;
 
     fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
-        let entry = Db::read_entry_mapped(self, position)?;
-        if let WalEntry::Index(bytes) = entry {
-            let entry = bincode::deserialize(&bytes)?;
-            Ok(entry)
-        } else {
-            panic!("Unexpected wal entry where expected record");
-        }
+        let (_, entry) = Db::read_entry(self, position)?;
+        Db::read_index(entry)
     }
 
     fn unload_supported(&self) -> bool {
         false
     }
 
-    fn unload(&self, _data: &IndexTable) -> DbResult<WalPosition> {
+    fn unload(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
         unimplemented!()
     }
 }
@@ -487,21 +513,22 @@ impl Loader for Db {
     type Error = DbError;
 
     fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
-        Loader::load(&*self.wal, position)
+        let entry = self.read_report_entry(position)?;
+        Self::read_index(entry)
     }
 
     fn unload_supported(&self) -> bool {
         true
     }
 
-    fn unload(&self, data: &IndexTable) -> DbResult<WalPosition> {
-        self.write_index(data)
+    fn unload(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
+        self.write_index(ks, data)
     }
 }
 
 pub(crate) enum WalEntry {
     Record(KeySpace, Bytes, Bytes),
-    Index(Bytes),
+    Index(KeySpace, Bytes),
     Remove(KeySpace, Bytes),
 }
 
@@ -529,7 +556,10 @@ impl WalEntry {
                 let v = bytes.slice(4 + key_len..);
                 WalEntry::Record(ks, k, v)
             }
-            WalEntry::WAL_ENTRY_INDEX => WalEntry::Index(bytes.slice(1..)),
+            WalEntry::WAL_ENTRY_INDEX => {
+                let ks = KeySpace(b.get_u8());
+                WalEntry::Index(ks, bytes.slice(2..))
+            }
             WalEntry::WAL_ENTRY_REMOVE => {
                 let ks = KeySpace(b.get_u8());
                 WalEntry::Remove(ks, bytes.slice(2..))
@@ -543,7 +573,7 @@ impl IntoBytesFixed for WalEntry {
     fn len(&self) -> usize {
         match self {
             WalEntry::Record(KeySpace(_), k, v) => 1 + 1 + 2 + k.len() + v.len(),
-            WalEntry::Index(index) => 1 + index.len(),
+            WalEntry::Index(KeySpace(_), index) => 1 + 1 + index.len(),
             WalEntry::Remove(KeySpace(_), k) => 1 + 1 + k.len(),
         }
     }
@@ -558,8 +588,9 @@ impl IntoBytesFixed for WalEntry {
                 buf.put_slice(&k);
                 buf.put_slice(&v);
             }
-            WalEntry::Index(bytes) => {
+            WalEntry::Index(ks, bytes) => {
                 buf.put_u8(Self::WAL_ENTRY_INDEX);
+                buf.put_u8(ks.0);
                 buf.put_slice(&bytes);
             }
             WalEntry::Remove(ks, k) => {

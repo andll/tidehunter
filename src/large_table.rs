@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::index_table::IndexTable;
-use crate::key_shape::KeySpaceDesc;
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
@@ -24,8 +24,8 @@ pub(crate) const LARGE_TABLE_MUTEXES: usize = 1024;
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
 
-#[derive(Default)]
 pub struct LargeTableEntry {
+    ks: KeySpaceDesc,
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
@@ -52,12 +52,13 @@ pub(crate) struct LargeTableSnapshot {
 pub(crate) enum LargeTableSnapshotEntry {
     Empty,
     Clean(WalPosition),
-    Dirty(Arc<IndexTable>),
-    DirtyUnloaded(WalPosition, Arc<IndexTable>),
+    Dirty(KeySpace, Arc<IndexTable>),
+    DirtyUnloaded(KeySpace, WalPosition, Arc<IndexTable>),
 }
 
 impl LargeTable {
     pub fn from_unloaded(
+        key_shape: &KeyShape,
         snapshot: &[WalPosition],
         config: Arc<Config>,
         metrics: Arc<Metrics>,
@@ -70,7 +71,8 @@ impl LargeTable {
         );
         let it = snapshot
             .into_iter()
-            .map(LargeTableEntry::from_snapshot_position);
+            .zip(key_shape.iter_ks_cells())
+            .map(|(s, ks)| LargeTableEntry::from_snapshot_position(ks, s));
         Self::from_iterator_size(it, config, metrics)
     }
 
@@ -133,7 +135,7 @@ impl LargeTable {
         entry.insert(k, v);
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
-            entry.unload(ks, loader, &self.config, &self.metrics)?;
+            entry.unload(loader, &self.config, &self.metrics)?;
             row.lru.remove(offset as u64);
         }
         self.metrics
@@ -192,7 +194,7 @@ impl LargeTable {
                 return Ok(found.valid());
             }
         }
-        let entry = self.load_entry(ks, row, offset, loader)?;
+        let entry = self.load_entry(row, offset, loader)?;
         Ok(entry.get(k))
     }
 
@@ -221,7 +223,6 @@ impl LargeTable {
 
     fn load_entry<'a, L: Loader>(
         &self,
-        ks: &KeySpaceDesc,
         mut row: MutexGuard<'a, Row>,
         offset: usize,
         loader: &L,
@@ -237,7 +238,7 @@ impl LargeTable {
             );
             // todo - we can try different approaches,
             // for example prioritize unloading Loaded entries over Dirty entries
-            row.data[unload as usize].unload(ks, loader, &self.config, &self.metrics)?;
+            row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
         }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
@@ -412,26 +413,32 @@ pub trait Loader {
 
     fn unload_supported(&self) -> bool;
 
-    fn unload(&self, data: &IndexTable) -> Result<WalPosition, Self::Error>;
+    fn unload(&self, ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error>;
 }
 
 impl LargeTableEntry {
-    pub fn new_unloaded(position: WalPosition) -> Self {
+    pub fn new_unloaded(ks: KeySpaceDesc, position: WalPosition) -> Self {
+        Self::new_with_state(ks, LargeTableEntryState::Unloaded(position))
+    }
+
+    pub fn new_empty(ks: KeySpaceDesc) -> Self {
+        Self::new_with_state(ks, LargeTableEntryState::Empty)
+    }
+
+    fn new_with_state(ks: KeySpaceDesc, state: LargeTableEntryState) -> Self {
         Self {
-            state: LargeTableEntryState::Unloaded(position),
-            ..Default::default()
+            ks,
+            state,
+            data: Default::default(),
+            last_added_position: Default::default(),
         }
     }
 
-    pub fn new_empty() -> Self {
-        Self::default()
-    }
-
-    pub fn from_snapshot_position(position: &WalPosition) -> Self {
+    pub fn from_snapshot_position(ks: KeySpaceDesc, position: &WalPosition) -> Self {
         if position == &WalPosition::INVALID {
-            LargeTableEntry::new_empty()
+            LargeTableEntry::new_empty(ks)
         } else {
-            LargeTableEntry::new_unloaded(*position)
+            LargeTableEntry::new_unloaded(ks, *position)
         }
     }
 
@@ -504,10 +511,10 @@ impl LargeTableEntry {
             LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
             LargeTableEntryState::DirtyLoaded(_, _) => {
-                LargeTableSnapshotEntry::Dirty(self.data.clone_shared())
+                LargeTableSnapshotEntry::Dirty(self.ks.id(), self.data.clone_shared())
             }
             LargeTableEntryState::DirtyUnloaded(pos, _) => {
-                LargeTableSnapshotEntry::DirtyUnloaded(pos, self.data.clone_shared())
+                LargeTableSnapshotEntry::DirtyUnloaded(self.ks.id(), pos, self.data.clone_shared())
             }
         }
     }
@@ -538,7 +545,6 @@ impl LargeTableEntry {
 
     pub fn unload<L: Loader>(
         &mut self,
-        ks: &KeySpaceDesc,
         loader: &L,
         config: &Config,
         metrics: &Metrics,
@@ -559,7 +565,7 @@ impl LargeTableEntry {
                     self.state,
                     LargeTableEntryState::DirtyLoaded(_, _)
                 ));
-                self.unload_dirty_loaded(ks, loader, metrics)?;
+                self.unload_dirty_loaded(loader, metrics)?;
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
@@ -567,7 +573,7 @@ impl LargeTableEntry {
                     metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
-                    self.unload_dirty_loaded(ks, loader, metrics)?;
+                    self.unload_dirty_loaded(loader, metrics)?;
                 } else {
                     metrics.unload.with_label_values(&["unmerge"]).inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
@@ -591,27 +597,26 @@ impl LargeTableEntry {
 
     fn unload_dirty_loaded<L: Loader>(
         &mut self,
-        ks: &KeySpaceDesc,
         loader: &L,
         metrics: &Metrics,
     ) -> Result<(), L::Error> {
-        self.run_compactor(ks, metrics);
-        let position = loader.unload(&self.data)?;
+        self.run_compactor(metrics);
+        let position = loader.unload(self.ks.id(), &self.data)?;
         self.state = LargeTableEntryState::Unloaded(position);
         self.data = Default::default();
         Ok(())
     }
 
-    fn run_compactor(&mut self, ks: &KeySpaceDesc, metrics: &Metrics) {
+    fn run_compactor(&mut self, metrics: &Metrics) {
         // todo run compactor during snapshot
-        if let Some(compactor) = ks.compactor() {
+        if let Some(compactor) = self.ks.compactor() {
             let index = self.data.make_mut();
             let pre_compact_len = index.len();
             compactor(&mut index.data);
             let compacted = pre_compact_len.saturating_sub(index.len());
             metrics
                 .compacted_keys
-                .with_label_values(&[ks.name()])
+                .with_label_values(&[self.ks.name()])
                 .inc_by(compacted as u64);
         }
     }

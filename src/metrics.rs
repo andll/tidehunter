@@ -15,8 +15,8 @@ pub struct Metrics {
     pub unload: IntCounterVec,
     pub entry_state: IntGaugeVec,
     pub compacted_keys: IntCounterVec,
-    // pub loaded_keys_total: IntGauge,
-    // pub loaded_keys_total_bytes: IntGauge,
+    pub read: IntCounterVec,
+    pub read_bytes: IntCounterVec,
 }
 
 #[macro_export]
@@ -58,6 +58,8 @@ impl Metrics {
             unload: counter_vec!("unload", &["kind"], registry),
             entry_state: gauge_vec!("entry_state", &["state"], registry),
             compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
+            read: counter_vec!("read", &["ks", "kind", "type"], registry),
+            read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
             // loaded_keys_total: gauge!("loaded_keys_total", registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };

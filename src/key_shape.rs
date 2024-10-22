@@ -25,6 +25,7 @@ pub struct KeySpace(pub(crate) u8);
 
 #[derive(Clone)]
 pub(crate) struct KeySpaceDesc {
+    id: KeySpace,
     name: String,
     range: Range<usize>,
     config: KeySpaceConfig,
@@ -85,11 +86,7 @@ impl KeyShapeBuilder {
         let start = self.const_spaces;
         self.const_spaces += size;
         let range = start..self.const_spaces;
-        self.add_key_space(KeySpaceDesc {
-            name,
-            range,
-            config,
-        })
+        self.add_key_space(name, range, config)
     }
 
     pub fn frac_key_space(&mut self, name: impl Into<String>, frac: usize) -> KeySpace {
@@ -122,20 +119,27 @@ impl KeyShapeBuilder {
         self.frac_spaces += frac;
         let end = self.const_spaces + self.frac_spaces * per_frac;
         let range = start..end;
-        self.add_key_space(KeySpaceDesc {
-            name,
-            range,
-            config,
-        })
+        self.add_key_space(name, range, config)
     }
 
-    fn add_key_space(&mut self, key_space: KeySpaceDesc) -> KeySpace {
+    fn add_key_space(
+        &mut self,
+        name: String,
+        range: Range<usize>,
+        config: KeySpaceConfig,
+    ) -> KeySpace {
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
             "Maximum {} key spaces allowed",
             u8::MAX
         );
         let ks = KeySpace(self.key_spaces.len() as u8);
+        let key_space = KeySpaceDesc {
+            id: ks,
+            name,
+            range,
+            config,
+        };
         self.key_spaces.push(key_space);
         ks
     }
@@ -199,6 +203,10 @@ impl KeySpaceDesc {
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
+
+    pub fn id(&self) -> KeySpace {
+        self.id
+    }
 }
 
 impl KeySpaceConfig {
@@ -222,6 +230,7 @@ impl KeySpaceConfig {
 impl KeyShape {
     pub fn new_whole(config: &Config) -> (Self, KeySpace) {
         let key_space = KeySpaceDesc {
+            id: KeySpace(0),
             name: "root".into(),
             range: 0..config.large_table_size,
             config: Default::default(),
@@ -233,6 +242,12 @@ impl KeyShape {
 
     pub(crate) fn cell(&self, ks: KeySpace, k: &[u8]) -> usize {
         self.ks(ks).cell(k)
+    }
+
+    pub(crate) fn iter_ks_cells(&self) -> impl Iterator<Item = KeySpaceDesc> + '_ {
+        self.key_spaces
+            .iter()
+            .flat_map(|desc| desc.range.clone().into_iter().map(|_| desc.clone()))
     }
 
     pub(crate) fn range_cell(

@@ -225,7 +225,13 @@ impl Wal {
         Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
     }
 
-    pub fn read_unmapped(&self, pos: WalPosition) -> Result<Bytes, WalError> {
+    /// Read the wal position without mapping.
+    /// If mapping exists, it is still used for reading
+    /// if mapping does not exist the read syscall is used instead.
+    ///
+    /// Returns (false, _) if read syscall was used
+    /// Returns (true, _) if mapping was used
+    pub fn read_unmapped(&self, pos: WalPosition) -> Result<(bool, Bytes), WalError> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -234,7 +240,7 @@ impl Wal {
         const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
-            Ok(CrcFrame::read_from_bytes(&map.data, offset as usize)?)
+            Ok((true, CrcFrame::read_from_bytes(&map.data, offset as usize)?))
         } else {
             let mut buf = BytesMut::zeroed(INITIAL_READ_SIZE);
             let read = self.file.read_at(&mut buf, pos.0)?;
@@ -251,7 +257,7 @@ impl Wal {
                     .read_exact_at(&mut buf[read..], pos.0 + read as u64)?;
             }
             let bytes = bytes::Bytes::from(buf).into();
-            Ok(CrcFrame::read_from_bytes(&bytes, 0)?)
+            Ok((false, CrcFrame::read_from_bytes(&bytes, 0)?))
         }
     }
 
@@ -571,10 +577,10 @@ mod tests {
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
             assert_eq!(&[91, 92, 93], wal.read(p4).unwrap().as_ref());
 
-            assert_eq!(&[1, 2, 3], wal.read_unmapped(p1).unwrap().as_ref());
-            assert_eq!(&[] as &[u8], wal.read_unmapped(p2).unwrap().as_ref());
-            assert_eq!(&large, wal.read_unmapped(p3).unwrap().as_ref());
-            assert_eq!(&[91, 92, 93], wal.read_unmapped(p4).unwrap().as_ref());
+            assert_eq!(&[1, 2, 3], wal.read_unmapped(p1).unwrap().1.as_ref());
+            assert_eq!(&[] as &[u8], wal.read_unmapped(p2).unwrap().1.as_ref());
+            assert_eq!(&large, wal.read_unmapped(p3).unwrap().1.as_ref());
+            assert_eq!(&[91, 92, 93], wal.read_unmapped(p4).unwrap().1.as_ref());
         }
         // we wrote into two frags
         assert_eq!(2048, fs::metadata(file).unwrap().len());
