@@ -171,6 +171,7 @@ impl LargeTable {
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
         if self.count_as_loaded(entry) {
+            // todo unload
             row.lru.insert(offset as u64);
         }
         Ok(())
