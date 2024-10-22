@@ -148,8 +148,14 @@ impl KeyShapeBuilder {
     }
 
     pub fn build(mut self) -> KeyShape {
+        let last_key_space = self
+            .key_spaces
+            .last()
+            .expect("Can't create empty key shape");
         if self.const_space_pad > 0 {
-            self.const_key_space("pad", self.const_space_pad);
+            let pad_start = last_key_space.range.end;
+            let range = pad_start..(pad_start + self.const_space_pad);
+            self.add_key_space("pad".to_string(), range, KeySpaceConfig::default());
         }
         self.check_no_overlap();
         KeyShape {
