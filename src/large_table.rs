@@ -29,6 +29,7 @@ pub struct LargeTableEntry {
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
+    metrics: Arc<Metrics>,
 }
 
 enum LargeTableEntryState {
@@ -72,7 +73,8 @@ impl LargeTable {
         let it = snapshot
             .into_iter()
             .zip(key_shape.iter_ks_cells())
-            .map(|(s, ks)| LargeTableEntry::from_snapshot_position(ks, s));
+            .map(|(s, ks)| LargeTableEntry::from_snapshot_position(ks, s, metrics.clone()));
+        let metrics = metrics.clone();
         Self::from_iterator_size(it, config, metrics)
     }
 
@@ -135,7 +137,7 @@ impl LargeTable {
         entry.insert(k, v);
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
-            entry.unload(loader, &self.config, &self.metrics)?;
+            entry.unload(loader, &self.config)?;
             row.lru.remove(offset as u64);
         }
         self.metrics
@@ -239,7 +241,7 @@ impl LargeTable {
             );
             // todo - we can try different approaches,
             // for example prioritize unloading Loaded entries over Dirty entries
-            row.data[unload as usize].unload(loader, &self.config, &self.metrics)?;
+            row.data[unload as usize].unload(loader, &self.config)?;
         }
         let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
         entry.maybe_load(loader)?;
@@ -418,53 +420,82 @@ pub trait Loader {
 }
 
 impl LargeTableEntry {
-    pub fn new_unloaded(ks: KeySpaceDesc, position: WalPosition) -> Self {
-        Self::new_with_state(ks, LargeTableEntryState::Unloaded(position))
+    pub fn new_unloaded(ks: KeySpaceDesc, position: WalPosition, metrics: Arc<Metrics>) -> Self {
+        Self::new_with_state(ks, LargeTableEntryState::Unloaded(position), metrics)
     }
 
-    pub fn new_empty(ks: KeySpaceDesc) -> Self {
-        Self::new_with_state(ks, LargeTableEntryState::Empty)
+    pub fn new_empty(ks: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
+        Self::new_with_state(ks, LargeTableEntryState::Empty, metrics)
     }
 
-    fn new_with_state(ks: KeySpaceDesc, state: LargeTableEntryState) -> Self {
+    fn new_with_state(
+        ks: KeySpaceDesc,
+        state: LargeTableEntryState,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             ks,
             state,
             data: Default::default(),
             last_added_position: Default::default(),
+            metrics,
         }
     }
 
-    pub fn from_snapshot_position(ks: KeySpaceDesc, position: &WalPosition) -> Self {
+    pub fn from_snapshot_position(
+        ks: KeySpaceDesc,
+        position: &WalPosition,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         if position == &WalPosition::INVALID {
-            LargeTableEntry::new_empty(ks)
+            LargeTableEntry::new_empty(ks, metrics)
         } else {
-            LargeTableEntry::new_unloaded(ks, *position)
+            LargeTableEntry::new_unloaded(ks, *position, metrics)
         }
     }
 
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         let dirty_state = self.state.mark_dirty();
         dirty_state.into_dirty_keys().insert(k.clone());
-        self.data.make_mut().insert(k, v);
+        let previous = self.data.make_mut().insert(k, v);
+        self.report_loaded_keys_change(previous, Some(v));
         self.last_added_position = Some(v);
     }
 
     pub fn remove(&mut self, k: Bytes, v: WalPosition) {
         let dirty_state = self.state.mark_dirty();
-        match dirty_state {
+        let (previous, new) = match dirty_state {
             DirtyState::Loaded(dirty_keys) => {
-                self.data.make_mut().remove(&k);
+                let previous = self.data.make_mut().remove(&k);
                 dirty_keys.insert(k);
+                (previous, None)
             }
             DirtyState::Unloaded(dirty_keys) => {
                 // We could just use dirty_keys and not use WalPosition::INVALID as a marker.
                 // In that case, however, we would need to clone and pass dirty_keys to a snapshot.
-                self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
+                let previous = self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
                 dirty_keys.insert(k);
+                (previous, Some(v))
             }
-        }
+        };
+        self.report_loaded_keys_change(previous, new);
         self.last_added_position = Some(v);
+    }
+
+    fn report_loaded_keys_delta(&self, delta: i64) {
+        self.metrics
+            .loaded_keys
+            .with_label_values(&[self.ks.name()])
+            .add(delta);
+    }
+    fn report_loaded_keys_change(&self, old: Option<WalPosition>, new: Option<WalPosition>) {
+        let delta = match (old, new) {
+            (None, None) => return,
+            (Some(_), Some(_)) => return,
+            (Some(_), None) => -1,
+            (None, Some(_)) => 1,
+        };
+        self.report_loaded_keys_delta(delta);
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
@@ -497,6 +528,7 @@ impl LargeTableEntry {
             }
             UnloadedState::Clean => None,
         };
+        self.report_loaded_keys_delta(data.len() as i64 - self.data.len() as i64);
         self.data = ArcCow::new_owned(data);
         if let Some(dirty_keys) = dirty_keys {
             self.state = LargeTableEntryState::DirtyLoaded(position, dirty_keys);
@@ -544,42 +576,42 @@ impl LargeTableEntry {
         }
     }
 
-    pub fn unload<L: Loader>(
-        &mut self,
-        loader: &L,
-        config: &Config,
-        metrics: &Metrics,
-    ) -> Result<(), L::Error> {
+    pub fn unload<L: Loader>(&mut self, loader: &L, config: &Config) -> Result<(), L::Error> {
         match &self.state {
             LargeTableEntryState::Empty => {}
             LargeTableEntryState::Unloaded(_) => {}
             LargeTableEntryState::Loaded(pos) => {
-                metrics.unload.with_label_values(&["clean"]).inc();
+                self.metrics.unload.with_label_values(&["clean"]).inc();
                 self.state = LargeTableEntryState::Unloaded(*pos);
+                self.report_loaded_keys_delta(-(self.data.len() as i64));
                 self.data = Default::default();
             }
             LargeTableEntryState::DirtyUnloaded(_pos, _dirty_keys) => {
                 // load, merge, flush and unload -> Unloaded(..)
-                metrics.unload.with_label_values(&["merge_flush"]).inc();
+                self.metrics
+                    .unload
+                    .with_label_values(&["merge_flush"])
+                    .inc();
                 self.maybe_load(loader)?;
                 assert!(matches!(
                     self.state,
                     LargeTableEntryState::DirtyLoaded(_, _)
                 ));
-                self.unload_dirty_loaded(loader, metrics)?;
+                self.unload_dirty_loaded(loader)?;
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
                 if config.excess_dirty_keys(dirty_keys.len()) {
-                    metrics.unload.with_label_values(&["flush"]).inc();
+                    self.metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
-                    self.unload_dirty_loaded(loader, metrics)?;
+                    self.unload_dirty_loaded(loader)?;
                 } else {
-                    metrics.unload.with_label_values(&["unmerge"]).inc();
+                    self.metrics.unload.with_label_values(&["unmerge"]).inc();
                     // or (b) unmerge and unload -> DirtyUnloaded(..)
                     /*todo - avoid cloning dirty_keys, especially twice*/
-                    self.data.make_mut().make_dirty(dirty_keys.clone());
+                    let delta = self.data.make_mut().make_dirty(dirty_keys.clone());
+                    self.report_loaded_keys_delta(delta);
                     self.state = LargeTableEntryState::DirtyUnloaded(*position, dirty_keys.clone());
                 }
             }
@@ -596,26 +628,23 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    fn unload_dirty_loaded<L: Loader>(
-        &mut self,
-        loader: &L,
-        metrics: &Metrics,
-    ) -> Result<(), L::Error> {
-        self.run_compactor(metrics);
+    fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
+        self.run_compactor();
         let position = loader.unload(self.ks.id(), &self.data)?;
         self.state = LargeTableEntryState::Unloaded(position);
+        self.report_loaded_keys_delta(-(self.data.len() as i64));
         self.data = Default::default();
         Ok(())
     }
 
-    fn run_compactor(&mut self, metrics: &Metrics) {
+    fn run_compactor(&mut self) {
         // todo run compactor during snapshot
         if let Some(compactor) = self.ks.compactor() {
             let index = self.data.make_mut();
             let pre_compact_len = index.len();
             compactor(&mut index.data);
             let compacted = pre_compact_len.saturating_sub(index.len());
-            metrics
+            self.metrics
                 .compacted_keys
                 .with_label_values(&[self.ks.name()])
                 .inc_by(compacted as u64);

@@ -17,6 +17,7 @@ pub struct Metrics {
     pub compacted_keys: IntCounterVec,
     pub read: IntCounterVec,
     pub read_bytes: IntCounterVec,
+    pub loaded_keys: IntGaugeVec,
 }
 
 #[macro_export]
@@ -60,7 +61,7 @@ impl Metrics {
             compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
-            // loaded_keys_total: gauge!("loaded_keys_total", registry),
+            loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)

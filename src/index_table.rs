@@ -12,12 +12,12 @@ pub(crate) struct IndexTable {
 }
 
 impl IndexTable {
-    pub fn insert(&mut self, k: Bytes, v: WalPosition) {
-        self.data.insert(k, v);
+    pub fn insert(&mut self, k: Bytes, v: WalPosition) -> Option<WalPosition> {
+        self.data.insert(k, v)
     }
 
-    pub fn remove(&mut self, k: &[u8]) {
-        self.data.remove(k);
+    pub fn remove(&mut self, k: &[u8]) -> Option<WalPosition> {
+        self.data.remove(k)
     }
 
     /// Merges dirty IndexTable into a loaded IndexTable
@@ -33,9 +33,10 @@ impl IndexTable {
     }
 
     /// Change loaded dirty IndexTable into unloaded dirty by retaining dirty keys and tombstones
-    pub fn make_dirty(&mut self, mut dirty_keys: HashSet<Bytes>) {
+    /// Returns delta in number of entries
+    pub fn make_dirty(&mut self, mut dirty_keys: HashSet<Bytes>) -> i64 {
+        let original_data_len = self.data.len() as i64;
         // todo this method can be optimized if dirty_keys are made sorted
-
         // only retain keys that are dirty, removing all clean keys
         self.data.retain(|k, _| dirty_keys.remove(k));
         // remaining dirty_keys are not in this index, means they were deleted
@@ -43,6 +44,8 @@ impl IndexTable {
         for dirty_key in dirty_keys {
             self.insert(dirty_key, WalPosition::INVALID);
         }
+        let data_len = self.data.len() as i64;
+        data_len - original_data_len
     }
 
     pub fn get(&self, k: &[u8]) -> Option<WalPosition> {
