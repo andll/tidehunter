@@ -70,15 +70,39 @@ impl LargeTable {
             config.large_table_size(),
             "Configured large table size does not match loaded snapshot size"
         );
-        let it = snapshot
-            .into_iter()
-            .zip(key_shape.iter_ks_cells())
-            .map(|(s, ks)| LargeTableEntry::from_snapshot_position(ks, s, metrics.clone()));
+
+        // Code below transposes key_shape to match layout of mutex table
+        // See test_ks_allocation
+        let size = config.large_table_size();
+        let per_mutex = size / LARGE_TABLE_MUTEXES;
+        let mut ks_table = (0..LARGE_TABLE_MUTEXES)
+            .map(|_| {
+                (0..per_mutex)
+                    .map(|_| None)
+                    .collect::<Vec<Option<KeySpaceDesc>>>()
+            })
+            .collect::<Vec<_>>();
+        key_shape
+            .iter_ks_cells()
+            .enumerate()
+            .for_each(|(cell, ks)| {
+                let (mutex, offset) = Self::locate(cell);
+                ks_table[mutex][offset] = Some(ks);
+            });
+        let ks_iter = ks_table.into_iter().map(|row| row.into_iter()).flatten();
+
+        let it = snapshot.into_iter().zip(ks_iter).map(|(s, ks)| {
+            LargeTableEntry::from_snapshot_position(
+                ks.expect("Ks table not fully initialized"),
+                s,
+                metrics.clone(),
+            )
+        });
         let metrics = metrics.clone();
-        Self::from_iterator_size(it, config, metrics)
+        Self::from_iterator(it, config, metrics)
     }
 
-    fn from_iterator_size(
+    fn from_iterator(
         mut it: impl Iterator<Item = LargeTableEntry>,
         config: Arc<Config>,
         metrics: Arc<Metrics>,
@@ -99,7 +123,7 @@ impl LargeTable {
             "max_loaded should be greater then 0"
         );
         let per_mutex = size / LARGE_TABLE_MUTEXES;
-        let mut rows = Vec::with_capacity(size);
+        let mut rows = Vec::with_capacity(LARGE_TABLE_MUTEXES);
         for _ in 0..LARGE_TABLE_MUTEXES {
             let mut data = Vec::with_capacity(per_mutex);
             for _ in 0..per_mutex {
@@ -786,5 +810,32 @@ impl Version {
 impl Default for LargeTableEntryState {
     fn default() -> Self {
         Self::Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::key_shape::KeyShapeBuilder;
+
+    #[test]
+    fn test_ks_allocation() {
+        let mut config = Config::small();
+        config.large_table_size = 2048;
+        let mut ks = KeyShapeBuilder::new(2048, 1);
+        let a = ks.const_key_space("a", 128);
+        let b = ks.const_key_space("b", 128);
+        ks.const_key_space("c", 2048 - 128 - 128);
+        let ks = ks.build();
+        let l = LargeTable::from_unloaded(
+            &ks,
+            &[WalPosition::INVALID; 2048],
+            Arc::new(config),
+            Metrics::new(),
+        );
+        let (mut row, offset) = l.row(ks.cell(a, &[]));
+        assert_eq!(row.entry_mut(offset).ks.name(), "a");
+        let (mut row, offset) = l.row(ks.cell(b, &[5, 2, 3, 4]));
+        assert_eq!(row.entry_mut(offset).ks.name(), "b");
     }
 }
