@@ -84,6 +84,7 @@ impl LargeTable {
             .collect::<Vec<_>>();
         key_shape
             .iter_ks_cells()
+            .take(size)
             .enumerate()
             .for_each(|(cell, ks)| {
                 let (mutex, offset) = Self::locate(cell);
