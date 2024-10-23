@@ -475,7 +475,7 @@ impl LargeTableEntry {
                 // In that case, however, we would need to clone and pass dirty_keys to a snapshot.
                 let previous = self.data.make_mut().insert(k.clone(), WalPosition::INVALID);
                 dirty_keys.insert(k);
-                (previous, Some(v))
+                (previous, Some(WalPosition::INVALID))
             }
         };
         self.report_loaded_keys_change(previous, new);
