@@ -488,6 +488,7 @@ impl LargeTableEntry {
             .with_label_values(&[self.ks.name()])
             .add(delta);
     }
+
     fn report_loaded_keys_change(&self, old: Option<WalPosition>, new: Option<WalPosition>) {
         let delta = match (old, new) {
             (None, None) => return,
@@ -570,6 +571,7 @@ impl LargeTableEntry {
             // We can also change it to Loaded,
             // if we send merged Index from the snapshot
             Some(DirtyState::Unloaded(_)) => {
+                self.report_loaded_keys_delta(-(self.data.len() as i64));
                 self.data = Default::default();
                 self.state = LargeTableEntryState::Unloaded(position)
             }
@@ -648,6 +650,7 @@ impl LargeTableEntry {
                 .compacted_keys
                 .with_label_values(&[self.ks.name()])
                 .inc_by(compacted as u64);
+            self.report_loaded_keys_delta(-(compacted as i64));
         }
     }
 
