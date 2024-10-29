@@ -211,6 +211,7 @@ impl Db {
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
             let ks = self.key_shape.ks(ks);
+            ks.check_key(&k);
             lock.insert(ks, k, position, self)?;
             last_position = position;
         }
@@ -221,6 +222,7 @@ impl Db {
                 .with_label_values(&["tombstone"])
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
+            ks.check_key(&k);
             let cell = self.key_shape.cell(ks, &k);
             lock.remove(cell, k, position, self)?;
             last_position = position;

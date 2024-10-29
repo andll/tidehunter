@@ -102,6 +102,15 @@ impl IndexTable {
         let capacity = element_size * self.data.len();
         let mut out = BytesMut::with_capacity(capacity);
         for (key, value) in self.data.iter() {
+            if key.len() != ks.key_size() {
+                // todo make into debug assertion
+                panic!(
+                    "Index in ks {} contains key length {} (configured {})",
+                    ks.name(),
+                    key.len(),
+                    ks.key_size()
+                );
+            }
             out.put_slice(&key);
             value.write_to_buf(&mut out);
         }
