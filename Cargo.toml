@@ -19,6 +19,7 @@ prometheus = "0.13.3"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+rand = "0.8.5"
 
 [features]
 stress = ["rand", "tempdir", "clap"]
