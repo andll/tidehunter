@@ -156,7 +156,7 @@ impl<'a> FileRange<'a> {
         let start = self.range.start.checked_add(range.start as u64).unwrap();
         let end = start.checked_add(range.len() as u64).unwrap();
         let mapped_range = start..end;
-        if start >= self.range.end || end >= self.range.end {
+        if start >= self.range.end || end > self.range.end {
             panic!(
                 "Trying to read range {range:?}, mapped to {mapped_range:?}, limits {:?} ",
                 self.range
