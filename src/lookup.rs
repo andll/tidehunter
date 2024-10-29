@@ -23,6 +23,12 @@ pub trait RandomRead {
     fn prefetch_range(&mut self, _range: &Range<usize>) {}
 }
 
+pub struct LookupResult {
+    pub result: Option<Bytes>,
+    pub reads: usize,
+    pub narrow_lookup_success: bool,
+}
+
 impl<R: RandomRead> Lookup<R> {
     pub fn new(target: R, key_size: usize, element_size: usize) -> Self {
         Self {
@@ -32,7 +38,7 @@ impl<R: RandomRead> Lookup<R> {
         }
     }
 
-    pub fn lookup(&mut self, key: &[u8]) -> Option<Bytes> {
+    pub fn lookup(&mut self, key: &[u8]) -> LookupResult {
         let len_elements = self.target.len() / self.element_size;
         let elements_range = 0..len_elements;
         let key_estimate = Self::read_u128(key);
@@ -43,10 +49,20 @@ impl<R: RandomRead> Lookup<R> {
             .prefetch_range(&self.element_range(&elements_range));
         self.target
             .prefetch_range(&self.element_range(&narrow_range));
-        if let Some(found) = self.lookup_in(key, narrow_range) {
-            return Some(found);
+        let mut reads = 0usize;
+        if let Some(found) = self.lookup_in(&mut reads, key, narrow_range) {
+            return LookupResult {
+                reads,
+                result: Some(found),
+                narrow_lookup_success: true,
+            };
         };
-        self.lookup_in(key, elements_range)
+        let result = self.lookup_in(&mut reads, key, elements_range);
+        LookupResult {
+            reads,
+            result,
+            narrow_lookup_success: false,
+        }
     }
 
     fn estimate_lookup_range(key_scaled: usize, range: &Range<usize>) -> Range<usize> {
@@ -56,9 +72,10 @@ impl<R: RandomRead> Lookup<R> {
         start..end
     }
 
-    fn lookup_in(&self, key: &[u8], mut elements_range: Range<usize>) -> Option<Bytes> {
+    fn lookup_in(&self, reads: &mut usize, key: &[u8], mut elements_range: Range<usize>) -> Option<Bytes> {
         while elements_range.len() > 0 {
             let p = Self::middle(&elements_range);
+            *reads += 1;
             let got = self.get(p);
             let got_key = &got[..self.key_size];
             match key.cmp(&got_key) {
@@ -156,7 +173,7 @@ mod tests {
         for i in 1..100 {
             let (d, sample) = fill(i);
             let mut lookup = Lookup::new(d, KEY_SIZE, SIZE);
-            let found = lookup.lookup(&sample[..KEY_SIZE]);
+            let found = lookup.lookup(&sample[..KEY_SIZE]).result;
             assert_eq!(found, Some(sample));
         }
         const REPEATS: usize = 100;
@@ -166,7 +183,7 @@ mod tests {
             let (d, sample) = fill(1024);
             let counter = RefCell::new(0usize);
             let mut lookup = Lookup::new((d, counter), KEY_SIZE, SIZE);
-            let found = lookup.lookup(&sample[..KEY_SIZE]);
+            let found = lookup.lookup(&sample[..KEY_SIZE]).result;
             assert_eq!(found, Some(sample));
             let iteration_reads = *lookup.target.1.borrow();
             reads += iteration_reads;
