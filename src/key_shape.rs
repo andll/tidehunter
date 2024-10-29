@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::db::MAX_KEY_LEN;
 use crate::large_table::LARGE_TABLE_MUTEXES;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
@@ -28,6 +29,7 @@ pub struct KeySpace(pub(crate) u8);
 pub(crate) struct KeySpaceDesc {
     id: KeySpace,
     name: String,
+    key_size: usize,
     range: Range<usize>,
     config: KeySpaceConfig,
 }
@@ -59,8 +61,13 @@ impl KeyShapeBuilder {
         }
     }
 
-    pub fn const_key_space(&mut self, name: impl Into<String>, size: usize) -> KeySpace {
-        self.const_key_space_config(name, size, KeySpaceConfig::default())
+    pub fn const_key_space(
+        &mut self,
+        name: impl Into<String>,
+        key_size: usize,
+        size: usize,
+    ) -> KeySpace {
+        self.const_key_space_config(name, key_size, size, KeySpaceConfig::default())
     }
 
     /// round up const_spaces to a multiple of LARGE_TABLE_MUTEXES and return const_space size
@@ -73,6 +80,7 @@ impl KeyShapeBuilder {
     pub fn const_key_space_config(
         &mut self,
         name: impl Into<String>,
+        key_size: usize,
         size: usize,
         config: KeySpaceConfig,
     ) -> KeySpace {
@@ -89,16 +97,22 @@ impl KeyShapeBuilder {
         let start = self.const_spaces;
         self.const_spaces += size;
         let range = start..self.const_spaces;
-        self.add_key_space(name, range, config)
+        self.add_key_space(name, key_size, range, config)
     }
 
-    pub fn frac_key_space(&mut self, name: impl Into<String>, frac: usize) -> KeySpace {
-        self.frac_key_space_config(name, frac, KeySpaceConfig::default())
+    pub fn frac_key_space(
+        &mut self,
+        name: impl Into<String>,
+        key_size: usize,
+        frac: usize,
+    ) -> KeySpace {
+        self.frac_key_space_config(name, key_size, frac, KeySpaceConfig::default())
     }
 
     pub fn frac_key_space_config(
         &mut self,
         name: impl Into<String>,
+        key_size: usize,
         frac: usize,
         config: KeySpaceConfig,
     ) -> KeySpace {
@@ -122,12 +136,13 @@ impl KeyShapeBuilder {
         self.frac_spaces += frac;
         let end = self.const_spaces + self.frac_spaces * per_frac;
         let range = start..end;
-        self.add_key_space(name, range, config)
+        self.add_key_space(name, key_size, range, config)
     }
 
     fn add_key_space(
         &mut self,
         name: String,
+        key_size: usize,
         range: Range<usize>,
         config: KeySpaceConfig,
     ) -> KeySpace {
@@ -136,10 +151,15 @@ impl KeyShapeBuilder {
             "Maximum {} key spaces allowed",
             u8::MAX
         );
+        assert!(
+            key_size <= MAX_KEY_LEN,
+            "Specified key size exceeding max key length"
+        );
         let ks = KeySpace(self.key_spaces.len() as u8);
         let key_space = KeySpaceDesc {
             id: ks,
             name,
+            key_size,
             range,
             config,
         };
@@ -155,7 +175,7 @@ impl KeyShapeBuilder {
         if self.const_space_pad > 0 {
             let pad_start = last_key_space.range.end;
             let range = pad_start..(pad_start + self.const_space_pad);
-            self.add_key_space("pad".to_string(), range, KeySpaceConfig::default());
+            self.add_key_space("pad".to_string(), 0, range, KeySpaceConfig::default());
         }
         self.check_no_overlap();
         KeyShape {
@@ -178,6 +198,17 @@ impl KeyShapeBuilder {
     }
 }
 impl KeySpaceDesc {
+    pub(crate) fn check_key(&self, k: &[u8]) {
+        if k.len() != self.key_size {
+            panic!(
+                "Key space {} accepts keys size {}, given {}",
+                self.name,
+                self.key_size,
+                k.len()
+            );
+        }
+    }
+
     pub(crate) fn cell(&self, k: &[u8]) -> usize {
         self.cell_by_prefix(self.cell_prefix(k))
     }
@@ -240,10 +271,11 @@ impl KeySpaceConfig {
 }
 
 impl KeyShape {
-    pub fn new_whole(config: &Config) -> (Self, KeySpace) {
+    pub fn new_whole(key_size: usize, config: &Config) -> (Self, KeySpace) {
         let key_space = KeySpaceDesc {
             id: KeySpace(0),
             name: "root".into(),
+            key_size,
             range: 0..config.large_table_size,
             config: Default::default(),
         };
@@ -287,9 +319,9 @@ impl KeyShape {
 #[test]
 fn test_ks_builder() {
     let mut ksb = KeyShapeBuilder::new(1024 * 1024 + 1, 8);
-    let ks1 = ksb.const_key_space("a", 1);
-    let ks2 = ksb.frac_key_space("b", 1);
-    let ks3 = ksb.frac_key_space("c", 2);
+    let ks1 = ksb.const_key_space("a", 0, 1);
+    let ks2 = ksb.frac_key_space("b", 0, 1);
+    let ks3 = ksb.frac_key_space("c", 0, 2);
     let shape = ksb.build();
     assert_eq!(0..1, shape.key_space_range(ks1));
     assert_eq!(1..(1 + 1024 * 1024 / 8), shape.key_space_range(ks2));

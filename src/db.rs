@@ -157,15 +157,15 @@ impl Db {
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
         let v = v.into();
-        assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let w = PreparedWalWrite::new(&WalEntry::Record(ks, k.clone(), v));
+        let ks = self.key_shape.ks(ks);
+        ks.check_key(&k);
+        let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v));
         self.metrics
             .wal_written_bytes_type
             .with_label_values(&["record"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        let ks = self.key_shape.ks(ks);
         self.large_table.read().insert(ks, k, position, self)?;
         Ok(())
     }
@@ -623,13 +623,14 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::key_shape::KeyShapeBuilder;
     use std::collections::HashSet;
 
     #[test]
     fn db_test() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(4, &config);
         {
             let db = Db::open(
                 dir.path(),
@@ -706,7 +707,7 @@ mod test {
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(4, &config);
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
         batch.write(ks, vec![5, 6, 7, 8], vec![15]);
@@ -720,7 +721,7 @@ mod test {
     fn test_remove() {
         let dir = tempdir::TempDir::new("test-remove").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(4, &config);
         {
             let db = Db::open(
                 dir.path(),
@@ -772,7 +773,7 @@ mod test {
     fn test_unordered_iterator() {
         let dir = tempdir::TempDir::new("test-unordered-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(4, &config);
         {
             let db = Arc::new(
                 Db::open(
@@ -817,7 +818,7 @@ mod test {
     fn test_ordered_iterator() {
         let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(5, &config);
         {
             let db = Arc::new(
                 Db::open(
@@ -833,7 +834,7 @@ mod test {
             db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
-            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
+            db.insert(ks, vec![3, 4, 5, 6, 11], vec![7]).unwrap();
             let it = db.range_ordered_iterator(
                 ks,
                 vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into(),
@@ -882,7 +883,7 @@ mod test {
     fn test_empty() {
         let dir = tempdir::TempDir::new("test-empty").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(5, &config);
         {
             let db = Arc::new(
                 Db::open(
@@ -915,7 +916,12 @@ mod test {
     fn test_small_keys() {
         let dir = tempdir::TempDir::new("test-small-keys").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let mut ksb = KeyShapeBuilder::from_config(&config, 4);
+        let ks0 = ksb.frac_key_space("a", 0, 1);
+        let ks1 = ksb.frac_key_space("b", 1, 1);
+        let ks2 = ksb.frac_key_space("c", 2, 1);
+        let _ks3 = ksb.frac_key_space("d", 3, 1);
+        let key_shape = ksb.build();
         {
             let db = Arc::new(
                 Db::open(
@@ -926,12 +932,12 @@ mod test {
                 )
                 .unwrap(),
             );
-            db.insert(ks, vec![], vec![1]).unwrap();
-            db.insert(ks, vec![1], vec![2]).unwrap();
-            db.insert(ks, vec![1, 2], vec![3]).unwrap();
-            assert_eq!(db.get(ks, &[]).unwrap(), Some(vec![1].into()));
-            assert_eq!(db.get(ks, &[1]).unwrap(), Some(vec![2].into()));
-            assert_eq!(db.get(ks, &[1, 2]).unwrap(), Some(vec![3].into()));
+            db.insert(ks0, vec![], vec![1]).unwrap();
+            db.insert(ks1, vec![1], vec![2]).unwrap();
+            db.insert(ks2, vec![1, 2], vec![3]).unwrap();
+            assert_eq!(db.get(ks0, &[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(ks1, &[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(ks2, &[1, 2]).unwrap(), Some(vec![3].into()));
         }
         {
             let db = Arc::new(
@@ -943,9 +949,9 @@ mod test {
                 )
                 .unwrap(),
             );
-            assert_eq!(db.get(ks, &[]).unwrap(), Some(vec![1].into()));
-            assert_eq!(db.get(ks, &[1]).unwrap(), Some(vec![2].into()));
-            assert_eq!(db.get(ks, &[1, 2]).unwrap(), Some(vec![3].into()));
+            assert_eq!(db.get(ks0, &[]).unwrap(), Some(vec![1].into()));
+            assert_eq!(db.get(ks1, &[1]).unwrap(), Some(vec![2].into()));
+            assert_eq!(db.get(ks2, &[1, 2]).unwrap(), Some(vec![3].into()));
         }
     }
 
@@ -953,7 +959,7 @@ mod test {
     fn test_last_in_range() {
         let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(5, &config);
         let db = Arc::new(
             Db::open(
                 dir.path(),
@@ -996,7 +1002,7 @@ mod test {
         config.max_loaded_entries = 1;
         config.large_table_size = 2 * crate::large_table::LARGE_TABLE_MUTEXES;
         let config = Arc::new(config);
-        let (key_shape, ks) = KeyShape::new_whole(&config);
+        let (key_shape, ks) = KeyShape::new_whole(5, &config);
         #[track_caller]
         fn check_all(db: &Db, ks: KeySpace, last: u8) {
             for i in 5u8..=last {

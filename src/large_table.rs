@@ -824,9 +824,9 @@ mod tests {
         let mut config = Config::small();
         config.large_table_size = 2048;
         let mut ks = KeyShapeBuilder::new(2048, 1);
-        let a = ks.const_key_space("a", 128);
-        let b = ks.const_key_space("b", 128);
-        ks.const_key_space("c", 2048 - 128 - 128);
+        let a = ks.const_key_space("a", 0, 128);
+        let b = ks.const_key_space("b", 0, 128);
+        ks.const_key_space("c", 0, 2048 - 128 - 128);
         let ks = ks.build();
         let l = LargeTable::from_unloaded(
             &ks,
