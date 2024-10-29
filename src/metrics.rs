@@ -18,6 +18,10 @@ pub struct Metrics {
     pub read: IntCounterVec,
     pub read_bytes: IntCounterVec,
     pub loaded_keys: IntGaugeVec,
+
+    pub lookup: IntCounterVec,
+    pub lookup_read: IntCounterVec,
+    pub narrow_lookup_success: IntCounterVec,
 }
 
 #[macro_export]
@@ -62,6 +66,10 @@ impl Metrics {
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
             loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
+
+            lookup: counter_vec!("lookup", &["ks"], registry),
+            lookup_read: counter_vec!("lookup_read", &["ks"], registry),
+            narrow_lookup_success: counter_vec!("narrow_lookup_success", &["ks"], registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)

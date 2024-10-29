@@ -238,6 +238,21 @@ impl LargeTable {
         );
         let result = lookup.lookup(k);
 
+        self.metrics
+            .lookup
+            .with_label_values(&[entry.ks.name()])
+            .inc();
+        if result.narrow_lookup_success {
+            self.metrics
+                .narrow_lookup_success
+                .with_label_values(&[entry.ks.name()])
+                .inc();
+        }
+        self.metrics
+            .lookup_read
+            .with_label_values(&[entry.ks.name()])
+            .inc_by(result.reads as u64);
+
         if let Some(result) = result.result {
             let position = WalPosition::from_slice(&result[ks.key_size()..]);
             Ok(Some(position))
