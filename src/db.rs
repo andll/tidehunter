@@ -174,7 +174,7 @@ impl Db {
 
     pub fn remove(&self, ks: KeySpace, k: impl Into<Bytes>) -> DbResult<()> {
         let k = k.into();
-        assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
+        self.key_shape.ks(ks).check_key(&k);
         let w = PreparedWalWrite::new(&WalEntry::Remove(ks, k.clone()));
         self.metrics
             .wal_written_bytes_type
@@ -222,7 +222,7 @@ impl Db {
                 .with_label_values(&["tombstone"])
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
-            ks.check_key(&k);
+            self.key_shape.ks(ks).check_key(&k);
             let cell = self.key_shape.cell(ks, &k);
             lock.remove(cell, k, position, self)?;
             last_position = position;
