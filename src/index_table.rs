@@ -1,10 +1,11 @@
+use crate::key_shape::KeySpaceDesc;
 use crate::wal::WalPosition;
+use bytes::{BufMut, BytesMut};
 use minibytes::Bytes;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::ops::RangeInclusive;
 
-#[derive(Default, Clone, Serialize, Deserialize, Debug)]
+#[derive(Default, Clone, Debug)]
 pub(crate) struct IndexTable {
     // todo instead of loading entire BTreeMap in memory we should be able
     // to load parts of it from disk
@@ -94,5 +95,35 @@ impl IndexTable {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn to_bytes(&self, ks: &KeySpaceDesc) -> Bytes {
+        let element_size = ks.key_size() + WalPosition::LENGTH;
+        let capacity = element_size * self.data.len();
+        let mut out = BytesMut::with_capacity(capacity);
+        for (key, value) in self.data.iter() {
+            out.put_slice(&key);
+            value.write_to_buf(&mut out);
+        }
+        assert_eq!(out.len(), capacity);
+        out.to_vec().into()
+    }
+
+    pub fn from_bytes(ks: &KeySpaceDesc, b: Bytes) -> Self {
+        let element_size = ks.key_size() + WalPosition::LENGTH;
+        let elements = b.len() / element_size;
+        assert_eq!(b.len(), elements * element_size);
+
+        let mut data = BTreeMap::new();
+        for i in 0..elements {
+            let key = b.slice(i * element_size..(i * element_size + ks.key_size()));
+            let value = WalPosition::from_slice(
+                &b[(i * element_size + ks.key_size())..(i * element_size + element_size)],
+            );
+            data.insert(key, value);
+        }
+
+        assert_eq!(data.len(), elements);
+        Self { data }
     }
 }

@@ -213,6 +213,10 @@ impl KeySpaceDesc {
         self.cell_by_prefix(self.cell_prefix(k))
     }
 
+    pub(crate) fn key_size(&self) -> usize {
+        self.key_size
+    }
+
     fn cell_by_prefix(&self, prefix: u32) -> usize {
         let prefix = prefix as usize;
         let len = self.range.end - self.range.start;

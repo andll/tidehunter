@@ -5,7 +5,7 @@ use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
-use crate::key_shape::{KeyShape, KeySpace};
+use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
@@ -414,7 +414,7 @@ impl Db {
                     Ok(position)
                 }
                 LargeTableSnapshotEntry::DirtyUnloaded(ks, pos, index) => {
-                    let mut clean = self.load(pos)?;
+                    let mut clean = self.load(self.key_shape.ks(ks), pos)?;
                     clean.merge_dirty(&index);
                     let position = self.write_index(ks, &clean)?;
                     index_updates.push(Some((index, position)));
@@ -427,8 +427,7 @@ impl Db {
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
-        let index = bincode::serialize(index)?;
-        let index = index.into();
+        let index = index.to_bytes(self.key_shape.ks(ks));
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
         self.metrics
             .wal_written_bytes_type
@@ -448,9 +447,9 @@ impl Db {
         Ok(entry)
     }
 
-    fn read_index(entry: WalEntry) -> DbResult<IndexTable> {
+    fn read_index(ks: &KeySpaceDesc, entry: WalEntry) -> DbResult<IndexTable> {
         if let WalEntry::Index(_, bytes) = entry {
-            let entry = bincode::deserialize(&bytes)?;
+            let entry = IndexTable::from_bytes(ks, bytes);
             Ok(entry)
         } else {
             panic!("Unexpected wal entry where expected record");
@@ -495,9 +494,9 @@ impl ControlRegionStore {
 impl Loader for Wal {
     type Error = DbError;
 
-    fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
+    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
         let (_, entry) = Db::read_entry(self, position)?;
-        Db::read_index(entry)
+        Db::read_index(ks, entry)
     }
 
     fn unload_supported(&self) -> bool {
@@ -512,9 +511,9 @@ impl Loader for Wal {
 impl Loader for Db {
     type Error = DbError;
 
-    fn load(&self, position: WalPosition) -> DbResult<IndexTable> {
+    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
         let entry = self.read_report_entry(position)?;
-        Self::read_index(entry)
+        Self::read_index(ks, entry)
     }
 
     fn unload_supported(&self) -> bool {

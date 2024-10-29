@@ -475,6 +475,14 @@ impl WalPosition {
         Self(buf.get_u64())
     }
 
+    pub fn from_slice(slice: &[u8]) -> Self {
+        Self(u64::from_be_bytes(
+            slice
+                .try_into()
+                .expect("Invalid slice length for WalPosition::from_slice"),
+        ))
+    }
+
     pub fn valid(self) -> Option<Self> {
         if self == Self::INVALID {
             None

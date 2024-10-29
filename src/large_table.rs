@@ -437,7 +437,7 @@ impl Row {
 pub trait Loader {
     type Error;
 
-    fn load(&self, position: WalPosition) -> Result<IndexTable, Self::Error>;
+    fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
 
     fn unload_supported(&self) -> bool;
 
@@ -546,7 +546,7 @@ impl LargeTableEntry {
         let Some((state, position)) = self.state.as_unloaded_state() else {
             return Ok(());
         };
-        let mut data = loader.load(position)?;
+        let mut data = loader.load(&self.ks, position)?;
         let dirty_keys = match state {
             UnloadedState::Dirty(dirty_keys) => {
                 data.merge_dirty(&self.data);
