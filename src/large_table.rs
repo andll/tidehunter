@@ -1,11 +1,12 @@
 use crate::config::Config;
 use crate::index_table::IndexTable;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
+use crate::lookup::Lookup;
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
-use crate::wal::WalPosition;
+use crate::wal::{WalPosition, WalRandomRead};
 use minibytes::Bytes;
 use parking_lot::{MappedMutexGuard, MutexGuard};
 use std::collections::{HashMap, HashSet};
@@ -213,17 +214,36 @@ impl LargeTable {
         let cell = ks.cell(&k);
         let (mut row, offset) = self.row(cell);
         let entry = row.entry_mut(offset);
-        if matches!(entry.state, LargeTableEntryState::DirtyUnloaded(_, _)) {
-            // optimization: in dirty unloaded state we might not need to load entry
-            if let Some(found) = entry.get(k) {
-                if self.count_as_loaded(entry) {
-                    row.lru.insert(offset as u64);
+        let index_position = match entry.state {
+            LargeTableEntryState::Empty => return Ok(None),
+            LargeTableEntryState::Loaded(_) => return Ok(entry.get(k)),
+            LargeTableEntryState::DirtyLoaded(_, _) => return Ok(entry.get(k)),
+            LargeTableEntryState::DirtyUnloaded(position, _) => {
+                // optimization: in dirty unloaded state we might not need to load entry
+                if let Some(found) = entry.get(k) {
+                    if self.count_as_loaded(entry) {
+                        row.lru.insert(offset as u64);
+                    }
+                    return Ok(found.valid());
                 }
-                return Ok(found.valid());
+                position
             }
+            LargeTableEntryState::Unloaded(position) => position,
+        };
+        let index_reader = loader.index_reader(index_position)?;
+        let mut lookup = Lookup::new(
+            index_reader,
+            entry.ks.key_size(),
+            IndexTable::element_size(&entry.ks),
+        );
+        let result = lookup.lookup(k);
+
+        if let Some(result) = result.result {
+            let position = WalPosition::from_slice(&result[ks.key_size()..]);
+            Ok(Some(position))
+        } else {
+            Ok(None)
         }
-        let entry = self.load_entry(row, offset, loader)?;
-        Ok(entry.get(k))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -438,6 +458,8 @@ pub trait Loader {
     type Error;
 
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> Result<IndexTable, Self::Error>;
+
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error>;
 
     fn unload_supported(&self) -> bool;
 

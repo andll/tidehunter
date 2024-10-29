@@ -98,7 +98,7 @@ impl IndexTable {
     }
 
     pub fn to_bytes(&self, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = ks.key_size() + WalPosition::LENGTH;
+        let element_size = Self::element_size(ks);
         let capacity = element_size * self.data.len();
         let mut out = BytesMut::with_capacity(capacity);
         for (key, value) in self.data.iter() {
@@ -110,7 +110,7 @@ impl IndexTable {
     }
 
     pub fn from_bytes(ks: &KeySpaceDesc, b: Bytes) -> Self {
-        let element_size = ks.key_size() + WalPosition::LENGTH;
+        let element_size = Self::element_size(ks);
         let elements = b.len() / element_size;
         assert_eq!(b.len(), elements * element_size);
 
@@ -125,5 +125,9 @@ impl IndexTable {
 
         assert_eq!(data.len(), elements);
         Self { data }
+    }
+
+    pub fn element_size(ks: &KeySpaceDesc) -> usize {
+        ks.key_size() + WalPosition::LENGTH
     }
 }

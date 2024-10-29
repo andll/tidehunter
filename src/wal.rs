@@ -267,7 +267,11 @@ impl Wal {
         }
     }
 
-    pub fn random_reader_at(&self, pos: WalPosition) -> Result<WalRandomRead, WalError> {
+    pub fn random_reader_at(
+        &self,
+        pos: WalPosition,
+        inner_offset: usize,
+    ) -> Result<WalRandomRead, WalError> {
         assert_ne!(
             pos,
             WalPosition::INVALID,
@@ -276,14 +280,16 @@ impl Wal {
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
             let offset = offset as usize;
-            let size = CrcFrame::read_size(&map.data[offset..offset + CrcFrame::CRC_HEADER_LENGTH]);
-            let data = map.data.slice(offset..offset + size);
+            let header_end = offset + CrcFrame::CRC_HEADER_LENGTH;
+            let size = CrcFrame::read_size(&map.data[offset..header_end]);
+            let data = map.data.slice(header_end + inner_offset..header_end + size);
             Ok(WalRandomRead::Mapped(data))
         } else {
             let mut buf = [0; CrcFrame::CRC_HEADER_LENGTH];
             self.file.read_exact_at(&mut buf, pos.0)?;
             let size = CrcFrame::read_size(&buf);
-            let range = offset..(offset + size as u64);
+            let header_end = pos.0 + CrcFrame::CRC_HEADER_LENGTH as u64;
+            let range = (header_end + inner_offset as u64)..(header_end + size as u64);
             Ok(WalRandomRead::File(FileRange::new(&self.file, range)))
         }
     }

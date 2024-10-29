@@ -10,7 +10,9 @@ use crate::large_table::{
     LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
 use crate::metrics::Metrics;
-use crate::wal::{PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalWriter};
+use crate::wal::{
+    PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
+};
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
@@ -499,6 +501,10 @@ impl Loader for Wal {
         Db::read_index(ks, entry)
     }
 
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+        Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
+    }
+
     fn unload_supported(&self) -> bool {
         false
     }
@@ -514,6 +520,12 @@ impl Loader for Db {
     fn load(&self, ks: &KeySpaceDesc, position: WalPosition) -> DbResult<IndexTable> {
         let entry = self.read_report_entry(position)?;
         Self::read_index(ks, entry)
+    }
+
+    fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error> {
+        Ok(self
+            .wal
+            .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
     fn unload_supported(&self) -> bool {
@@ -543,6 +555,7 @@ impl WalEntry {
     const WAL_ENTRY_RECORD: u8 = 1;
     const WAL_ENTRY_INDEX: u8 = 2;
     const WAL_ENTRY_REMOVE: u8 = 3;
+    pub const INDEX_PREFIX_SIZE: usize = 2;
 
     pub fn from_bytes(bytes: Bytes) -> Self {
         let mut b = &bytes[..];
@@ -1123,7 +1136,7 @@ mod test {
             check_all(&db, ks, 12);
             db.insert(ks, vec![1, 2, 3, 4, 13], vec![13]).unwrap();
             db.get(ks, &other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 1, 1, 0, 0);
+            check_metrics(&db.metrics, 0, 1, 0, 0);
         }
         {
             let db = Arc::new(
@@ -1143,7 +1156,7 @@ mod test {
                 "Some entries are not clean after snapshot"
             );
             db.get(ks, &other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 0, 0, 0, 1);
+            check_metrics(&db.metrics, 0, 0, 0, 0);
         }
     }
 }
