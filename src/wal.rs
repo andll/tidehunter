@@ -1,4 +1,5 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::lookup::{FileRange, RandomRead};
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use bytes::{Buf, BufMut, BytesMut};
@@ -54,6 +55,11 @@ type MapMutex = ShardedMutex<Maps, MAP_MUTEXES>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
+
+pub enum WalRandomRead<'a> {
+    Mapped(Bytes),
+    File(FileRange<'a>),
+}
 
 impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
@@ -261,6 +267,27 @@ impl Wal {
         }
     }
 
+    pub fn random_reader_at(&self, pos: WalPosition) -> Result<WalRandomRead, WalError> {
+        assert_ne!(
+            pos,
+            WalPosition::INVALID,
+            "Trying to read invalid wal position"
+        );
+        let (map, offset) = self.layout.locate(pos.0);
+        if let Some(map) = self.get_map(map) {
+            let offset = offset as usize;
+            let size = CrcFrame::read_size(&map.data[offset..offset + CrcFrame::CRC_HEADER_LENGTH]);
+            let data = map.data.slice(offset..offset + size);
+            Ok(WalRandomRead::Mapped(data))
+        } else {
+            let mut buf = [0; CrcFrame::CRC_HEADER_LENGTH];
+            self.file.read_exact_at(&mut buf, pos.0)?;
+            let size = CrcFrame::read_size(&buf);
+            let range = offset..(offset + size as u64);
+            Ok(WalRandomRead::File(FileRange::new(&self.file, range)))
+        }
+    }
+
     fn get_map(&self, id: u64) -> Option<Map> {
         let mut maps = self.maps.lock(id as usize);
         let map = maps.maps.get(&id)?.clone();
@@ -433,6 +460,29 @@ impl WalIterator {
 
     pub fn wal(&self) -> &Wal {
         &self.wal
+    }
+}
+
+impl RandomRead for WalRandomRead<'_> {
+    fn read(&self, range: Range<usize>) -> Bytes {
+        match self {
+            WalRandomRead::Mapped(bytes) => bytes.slice(range),
+            WalRandomRead::File(fr) => fr.read(range),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            WalRandomRead::Mapped(bytes) => bytes.len(),
+            WalRandomRead::File(range) => range.len(),
+        }
+    }
+
+    fn prefetch_range(&mut self, _range: &Range<usize>) {
+        match self {
+            WalRandomRead::Mapped(_) => {}
+            WalRandomRead::File(_) => { /*todo*/ }
+        }
     }
 }
 

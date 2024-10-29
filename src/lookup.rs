@@ -72,7 +72,12 @@ impl<R: RandomRead> Lookup<R> {
         start..end
     }
 
-    fn lookup_in(&self, reads: &mut usize, key: &[u8], mut elements_range: Range<usize>) -> Option<Bytes> {
+    fn lookup_in(
+        &self,
+        reads: &mut usize,
+        key: &[u8],
+        mut elements_range: Range<usize>,
+    ) -> Option<Bytes> {
         while elements_range.len() > 0 {
             let p = Self::middle(&elements_range);
             *reads += 1;
@@ -141,7 +146,11 @@ impl RandomRead for FileRange<'_> {
     }
 }
 
-impl FileRange<'_> {
+impl<'a> FileRange<'a> {
+    pub fn new(file: &'a File, range: Range<u64>) -> Self {
+        Self { file, range }
+    }
+
     #[inline]
     fn checked_range(&self, range: Range<usize>) -> Range<u64> {
         let start = self.range.start.checked_add(range.start as u64).unwrap();
