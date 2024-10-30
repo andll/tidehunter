@@ -10,6 +10,7 @@ pub struct Lookup<R> {
     target: R,
     key_size: usize,
     element_size: usize,
+    narrow_key_range: Range<u128>,
 }
 
 pub struct FileRange<'a> {
@@ -35,15 +36,43 @@ impl<R: RandomRead> Lookup<R> {
             target,
             key_size,
             element_size,
+            narrow_key_range: 0..u128::MAX,
         }
+    }
+
+    /// Specify the range for possible key values during lookup
+    /// By default lookup assumes keys are uniformly distributed in range [0; key_size]..[0xff; key_size]
+    /// This function narrows down the possible range of keys.
+    /// This function assumes that key space is broken down into equal buckets,
+    /// and this function takes the number of such buckets, and the specific bucket this lookup serves.
+    ///
+    /// Specifying key range is needed for the narrow lookup optimization to work correctly,
+    /// as it only works if distribution of the keys during lookup is known ahead of time.
+    /// (also see test_narrow_lookup test in Db tests)
+    pub fn with_key_range(&mut self, buckets: usize, bucket: usize) {
+        let buckets = buckets as u128;
+        let bucket = bucket as u128;
+        let bucket_size = u128::MAX / buckets;
+        self.narrow_key_range = bucket * bucket_size..((bucket + 1) * bucket_size);
     }
 
     pub fn lookup(&mut self, key: &[u8]) -> LookupResult {
         let len_elements = self.target.len() / self.element_size;
         let elements_range = 0..len_elements;
         let key_estimate = Self::read_u128(key);
-        let scale = u128::MAX / len_elements as u128;
-        let key_scaled = (key_estimate / scale) as usize;
+        let key_range_offset = key_estimate.checked_sub(self.narrow_key_range.start);
+        let key_range_offset = match key_range_offset {
+            Some(key_range_offset) => key_range_offset,
+            None => {
+                #[cfg(debug_assertions)]
+                panic!("Lookup key does not fit suggested key range, key_estimate {key_estimate}, suggested key range {:?}", self.narrow_key_range);
+                #[cfg(not(debug_assertions))]
+                0
+            }
+        };
+        let key_range_len = self.narrow_key_range.end - self.narrow_key_range.start;
+        let scale = key_range_len / len_elements as u128;
+        let key_scaled = (key_range_offset / scale) as usize;
         let narrow_range = Self::estimate_lookup_range(key_scaled, &elements_range);
         self.target
             .prefetch_range(&self.element_range(&elements_range));

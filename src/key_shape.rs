@@ -217,10 +217,18 @@ impl KeySpaceDesc {
         self.key_size
     }
 
+    pub(crate) fn bucket(&self, k: &[u8]) -> usize {
+        let prefix = self.cell_prefix(k) as usize;
+        prefix % self.num_buckets()
+    }
+
+    pub(crate) fn num_buckets(&self) -> usize {
+        self.range.end - self.range.start
+    }
+
     fn cell_by_prefix(&self, prefix: u32) -> usize {
         let prefix = prefix as usize;
-        let len = self.range.end - self.range.start;
-        self.range.start + (prefix % len)
+        self.range.start + (prefix % self.num_buckets())
     }
 
     fn cell_prefix(&self, k: &[u8]) -> u32 {

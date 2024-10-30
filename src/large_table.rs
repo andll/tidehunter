@@ -236,6 +236,9 @@ impl LargeTable {
             entry.ks.key_size(),
             IndexTable::element_size(&entry.ks),
         );
+        // See test_narrow_lookup in db.rs for details
+        // Commenting this line reduces narrow lookup success rate from 100% to 10%
+        lookup.with_key_range(entry.ks.num_buckets(), entry.ks.bucket(k));
         let result = lookup.lookup(k);
 
         self.metrics
