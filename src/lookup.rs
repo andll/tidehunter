@@ -79,13 +79,13 @@ impl<R: RandomRead> Lookup<R> {
         self.target
             .prefetch_range(&self.element_range(&narrow_range));
         let mut reads = 0usize;
-        if let Some(found) = self.lookup_in(&mut reads, key, narrow_range) {
-            return LookupResult {
-                reads,
-                result: Some(found),
-                narrow_lookup_success: true,
-            };
-        };
+        // if let Some(found) = self.lookup_in(&mut reads, key, narrow_range) {
+        //     return LookupResult {
+        //         reads,
+        //         result: Some(found),
+        //         narrow_lookup_success: true,
+        //     };
+        // };
         let result = self.lookup_in(&mut reads, key, elements_range);
         LookupResult {
             reads,
