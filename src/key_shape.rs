@@ -218,8 +218,8 @@ impl KeySpaceDesc {
     }
 
     pub(crate) fn bucket(&self, k: &[u8]) -> usize {
-        let prefix = self.cell_prefix(k) as usize;
-        prefix % self.num_buckets()
+        let prefix = self.cell_prefix(k);
+        self.bucket_by_prefix(prefix)
     }
 
     pub(crate) fn num_buckets(&self) -> usize {
@@ -227,8 +227,18 @@ impl KeySpaceDesc {
     }
 
     fn cell_by_prefix(&self, prefix: u32) -> usize {
-        let prefix = prefix as usize;
-        self.range.start + (prefix % self.num_buckets())
+        self.range.start + self.bucket_by_prefix(prefix)
+    }
+
+    fn bucket_by_prefix(&self, prefix: u32) -> usize {
+        let prefix = prefix as u64;
+        // this does not overflow: prefix <= u32::MAX, num_buckets <= u32::MAX
+        // therefore, prefix * num_buckets < u64::MAX,
+        let bucket = prefix * (self.num_buckets() as u64) / (u32::MAX as u64);
+        // no overflow even if usize==u32, since bucket is less than u32::MAX
+        let bucket = bucket as usize;
+        debug_assert!(bucket < self.num_buckets());
+        bucket
     }
 
     fn cell_prefix(&self, k: &[u8]) -> u32 {
@@ -236,7 +246,7 @@ impl KeySpaceDesc {
         let copy = cmp::min(k.len(), 4);
         let mut p = [0u8; 4];
         p[..copy].copy_from_slice(&k[..copy]);
-        u32::from_le_bytes(p)
+        u32::from_be_bytes(p)
     }
 
     /// Returns the cell containing the range.

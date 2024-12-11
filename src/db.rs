@@ -1133,7 +1133,7 @@ mod test {
                 "clean metric does not match"
             );
         }
-        let other_key = vec![1, 6, 3, 4, 5];
+        let other_key = vec![129, 2, 3, 4, 5];
         {
             let db = Arc::new(
                 Db::open(
@@ -1157,9 +1157,9 @@ mod test {
                 // This way we trigger unloading on the
                 // cell containing keys prefixed by [1, 2, 3, 4, ...]
                 //
-                // println!("A {:?}", LargeTable::locate(lt.cell(&[1, 2, 3, 4])));
+                // println!("A {:?}", LargeTable::locate(db.key_shape.cell(ks,&[1, 2, 3, 4])));
                 // for i in 0..255 {
-                //     println!("{i} {:?}", LargeTable::locate(lt.cell(&[1, i, 3, 4])));
+                //     println!("{i} {:?}", LargeTable::locate(db.key_shape.cell(ks,&[i, 2, 3, 4])));
                 // }
             }
 
