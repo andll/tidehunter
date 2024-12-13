@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub struct LargeTable {
-    data: Box<ShardedMutex<Row, LARGE_TABLE_MUTEXES>>,
+    data: Box<ShardedMutex<Row>>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
 }

@@ -1,12 +1,10 @@
 use parking_lot::{Mutex, MutexGuard};
 
-pub struct ShardedMutex<V, const N: usize>([Mutex<V>; N]);
+pub struct ShardedMutex<V>(Box<[Mutex<V>]>);
 
-impl<V, const N: usize> ShardedMutex<V, N> {
+impl<V> ShardedMutex<V> {
     pub fn from_iterator(v: impl Iterator<Item = V>) -> Self {
-        let Ok(arr) = v.map(Mutex::new).collect::<Vec<_>>().try_into() else {
-            panic!("Iterator length is different from ShardedMutex configured len");
-        };
+        let arr = v.map(Mutex::new).collect::<Vec<_>>().into_boxed_slice();
         Self(arr)
     }
 
@@ -14,22 +12,22 @@ impl<V, const N: usize> ShardedMutex<V, N> {
         self.0[n % self.0.len()].lock()
     }
 
-    pub fn mutexes(&self) -> &[Mutex<V>; N] {
+    pub fn mutexes(&self) -> &[Mutex<V>] {
         &self.0
     }
 }
 
-impl<V, const N: usize> AsRef<[Mutex<V>; N]> for ShardedMutex<V, N> {
-    fn as_ref(&self) -> &[Mutex<V>; N] {
+impl<V> AsRef<[Mutex<V>]> for ShardedMutex<V> {
+    fn as_ref(&self) -> &[Mutex<V>] {
         &self.0
     }
 }
 
-impl<V: Default, const N: usize> Default for ShardedMutex<V, N>
-where
-    [Mutex<V>; N]: Default,
-{
-    fn default() -> Self {
-        Self(Default::default())
+impl<V: Default> ShardedMutex<V> {
+    pub fn new_default_array<const N: usize>() -> Self
+    where
+        [Mutex<V>; N]: Default,
+    {
+        Self(Box::new(<[Mutex<V>; N]>::default()))
     }
 }

@@ -51,7 +51,7 @@ struct Maps {
 }
 
 const MAP_MUTEXES: usize = 8;
-type MapMutex = ShardedMutex<Maps, MAP_MUTEXES>;
+type MapMutex = ShardedMutex<Maps>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
@@ -214,7 +214,7 @@ impl Wal {
         let reader = Wal {
             file,
             layout,
-            maps: Default::default(),
+            maps: ShardedMutex::new_default_array::<MAP_MUTEXES>(),
         };
         Arc::new(reader)
     }
