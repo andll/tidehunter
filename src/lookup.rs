@@ -1,5 +1,4 @@
 use minibytes::Bytes;
-use std::cell::RefCell;
 use std::cmp;
 use std::cmp::Ordering;
 use std::fs::File;
@@ -201,6 +200,7 @@ mod tests {
     use bytes::{BufMut, BytesMut};
     use rand::rngs::ThreadRng;
     use rand::{Rng, RngCore};
+    use std::cell::RefCell;
 
     const KEY_SIZE: usize = 32;
     const SIZE: usize = KEY_SIZE + 8;
