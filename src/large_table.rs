@@ -15,12 +15,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub struct LargeTable {
-    data: Box<ShardedMutex<Row>>,
+    table: Vec<ShardedMutex<Row>>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
 }
-
-pub(crate) const LARGE_TABLE_MUTEXES: usize = 1024;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Version(pub u64);
@@ -46,10 +44,15 @@ struct Row {
     data: Box<[LargeTableEntry]>,
 }
 
+/// ks -> row -> cell
+pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<Vec<T>>>);
+
 pub(crate) struct LargeTableSnapshot {
-    data: Box<[LargeTableSnapshotEntry]>,
+    data: LargeTableContainer<LargeTableSnapshotEntry>,
     last_added_position: Option<WalPosition>,
 }
+
+/// ks -> row -> cell
 
 pub(crate) enum LargeTableSnapshotEntry {
     Empty,
@@ -61,90 +64,48 @@ pub(crate) enum LargeTableSnapshotEntry {
 impl LargeTable {
     pub fn from_unloaded(
         key_shape: &KeyShape,
-        snapshot: &[WalPosition],
+        snapshot: &LargeTableContainer<WalPosition>,
         config: Arc<Config>,
         metrics: Arc<Metrics>,
     ) -> Self {
-        let size = snapshot.len();
         assert_eq!(
-            size,
-            config.large_table_size(),
-            "Configured large table size does not match loaded snapshot size"
+            snapshot.0.len(),
+            key_shape.num_ks(),
+            "Snapshot has different number of key spaces"
         );
-
-        // Code below transposes key_shape to match layout of mutex table
-        // See test_ks_allocation
-        let size = config.large_table_size();
-        let per_mutex = size / LARGE_TABLE_MUTEXES;
-        let mut ks_table = (0..LARGE_TABLE_MUTEXES)
-            .map(|_| {
-                (0..per_mutex)
-                    .map(|_| None)
-                    .collect::<Vec<Option<KeySpaceDesc>>>()
+        let table = key_shape
+            .iter_ks()
+            .zip(snapshot.0.iter())
+            .map(|(ks, ks_snapshot)| {
+                if ks_snapshot.len() != ks.num_mutexes() {
+                    panic!(
+                        "Invalid snapshot for ks {}: {} rows, expected {} rows",
+                        ks.id().as_usize(),
+                        ks_snapshot.len(),
+                        ks.num_mutexes()
+                    );
+                }
+                let rows = ks_snapshot.iter().map(|row_snapshot| {
+                    let data = row_snapshot
+                        .iter()
+                        .map(|position| {
+                            LargeTableEntry::from_snapshot_position(
+                                ks.clone(),
+                                position,
+                                metrics.clone(),
+                            )
+                        })
+                        .collect();
+                    Row {
+                        data,
+                        lru: Lru::default(),
+                    }
+                });
+                ShardedMutex::from_iterator(rows)
             })
-            .collect::<Vec<_>>();
-        key_shape
-            .iter_ks_cells()
-            .take(size)
-            .enumerate()
-            .for_each(|(cell, ks)| {
-                let (mutex, offset) = Self::locate(cell);
-                ks_table[mutex][offset] = Some(ks);
-            });
-        let ks_iter = ks_table.into_iter().map(|row| row.into_iter()).flatten();
-
-        let it = snapshot.into_iter().zip(ks_iter).map(|(s, ks)| {
-            LargeTableEntry::from_snapshot_position(
-                ks.expect("Ks table not fully initialized"),
-                s,
-                metrics.clone(),
-            )
-        });
-        let metrics = metrics.clone();
-        Self::from_iterator(it, config, metrics)
-    }
-
-    fn from_iterator(
-        mut it: impl Iterator<Item = LargeTableEntry>,
-        config: Arc<Config>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
-        let size = config.large_table_size();
-        assert!(size <= u32::MAX as usize);
-        assert!(
-            size >= LARGE_TABLE_MUTEXES,
-            "Large table size should be at least LARGE_TABLE_MUTEXES"
-        );
-        assert_eq!(
-            size % LARGE_TABLE_MUTEXES,
-            0,
-            "Large table size should be dividable by LARGE_TABLE_MUTEXES"
-        );
-        assert!(
-            config.max_loaded_entries() > 0,
-            "max_loaded should be greater then 0"
-        );
-        let per_mutex = size / LARGE_TABLE_MUTEXES;
-        let mut rows = Vec::with_capacity(LARGE_TABLE_MUTEXES);
-        for _ in 0..LARGE_TABLE_MUTEXES {
-            let mut data = Vec::with_capacity(per_mutex);
-            for _ in 0..per_mutex {
-                data.push(it.next().expect("Iterator has less data then table size"));
-            }
-            let data = data.into_boxed_slice();
-            let row = Row {
-                data,
-                lru: Lru::default(),
-            };
-            rows.push(row);
-        }
-        assert!(
-            it.next().is_none(),
-            "Iterator has more data then table size"
-        );
-        let data = Box::new(ShardedMutex::from_iterator(rows.into_iter()));
+            .collect();
         Self {
-            data,
+            table,
             config,
             metrics,
         }
@@ -157,8 +118,7 @@ impl LargeTable {
         v: WalPosition,
         loader: &L,
     ) -> Result<(), L::Error> {
-        let cell = ks.cell(&k);
-        let (mut row, offset) = self.row(cell);
+        let (mut row, offset) = self.row(ks, &k);
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
@@ -181,21 +141,18 @@ impl LargeTable {
         self.metrics
             .max_index_size_metric
             .set(max_index_size as i64);
-        if index_size == max_index_size {
-            self.metrics.max_index_size_cell.set(cell as i64);
-        }
         self.metrics.index_size.observe(index_size as f64);
         Ok(())
     }
 
     pub fn remove<L: Loader>(
         &self,
-        cell: usize,
+        ks: &KeySpaceDesc,
         k: Bytes,
         v: WalPosition,
         _loader: &L,
     ) -> Result<(), L::Error> {
-        let (mut row, offset) = self.row(cell);
+        let (mut row, offset) = self.row(ks, &k);
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
         if self.count_as_loaded(entry) {
@@ -211,8 +168,7 @@ impl LargeTable {
         k: &[u8],
         loader: &L,
     ) -> Result<Option<WalPosition>, L::Error> {
-        let cell = ks.cell(&k);
-        let (mut row, offset) = self.row(cell);
+        let (mut row, offset) = self.row(ks, k);
         let entry = row.entry_mut(offset);
         let index_position = match entry.state {
             LargeTableEntryState::Empty => return Ok(None),
@@ -238,7 +194,7 @@ impl LargeTable {
         );
         // See test_narrow_lookup in db.rs for details
         // Commenting this line reduces narrow lookup success rate from 100% to 10%
-        lookup.with_key_range(entry.ks.num_buckets(), entry.ks.bucket(k));
+        lookup.with_key_range(entry.ks.num_cells(), entry.ks.cell(k));
         let result = lookup.lookup(k);
 
         self.metrics
@@ -265,10 +221,11 @@ impl LargeTable {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data
-            .mutexes()
-            .iter()
-            .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
+        self.table.iter().all(|m| {
+            m.mutexes()
+                .iter()
+                .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
+        })
     }
 
     fn count_as_loaded(&self, entry: &mut LargeTableEntry) -> bool {
@@ -311,29 +268,48 @@ impl LargeTable {
         Ok(entry)
     }
 
-    fn row(&self, cell: usize) -> (MutexGuard<'_, Row>, usize) {
-        let (mutex, offset) = Self::locate(cell);
-        let row = self.data.lock(mutex);
+    fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
+        let ks_table = self.ks_table(ks);
+        let (mutex, offset) = ks.locate(k);
+        let row = ks_table.lock(mutex);
         (row, offset)
+    }
+
+    fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
+        self.table
+            .get(ks.id().as_usize())
+            .expect("Table not found for ks")
     }
 
     /// Provides a snapshot of this large table.
     /// Takes &mut reference to ensure consistency of last_added_position.
     pub fn snapshot(&mut self) -> LargeTableSnapshot {
-        let mut data = Vec::with_capacity(self.config.large_table_size());
         let mut last_added_position = None;
-        for mutex in self.data.as_ref().as_ref() {
-            let mut lock = mutex.lock();
-            for entry in lock.data.iter_mut() {
-                let snapshot = entry.snapshot();
-                LargeTableSnapshot::update_last_added_position(
-                    &mut last_added_position,
-                    entry.last_added_position,
-                );
-                data.push(snapshot);
-            }
-        }
-        let data = data.into_boxed_slice();
+        let data = self
+            .table
+            .iter()
+            .map(|ks_table| {
+                ks_table
+                    .mutexes()
+                    .iter()
+                    .map(|mutex| {
+                        let mut lock = mutex.lock();
+                        lock.data
+                            .iter_mut()
+                            .map(|entry| {
+                                let snapshot = entry.snapshot();
+                                LargeTableSnapshot::update_last_added_position(
+                                    &mut last_added_position,
+                                    entry.last_added_position,
+                                );
+                                snapshot
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        let data = LargeTableContainer(data);
         LargeTableSnapshot {
             data,
             last_added_position,
@@ -341,22 +317,21 @@ impl LargeTable {
     }
 
     /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken.
-    pub fn maybe_update_entries(&self, updates: Vec<Option<(Arc<IndexTable>, WalPosition)>>) {
-        // order in this iterator is consistent with what is
-        // produced by LargeTable::snapshot and
-        // with what is expected by LargeTable::from_iterator_size
-        let mut updates = updates.into_iter();
-        for i in 0..LARGE_TABLE_MUTEXES {
-            let mut lock = self.data.lock(i);
-            for entry in &mut lock.data {
-                let update = updates.next().expect("Not enough updates for large table");
-                let Some((data, position)) = update else {
-                    continue;
-                };
-                entry.maybe_set_to_clean(&data, position);
+    pub fn maybe_update_entries(
+        &self,
+        updates: LargeTableContainer<Option<(Arc<IndexTable>, WalPosition)>>,
+    ) {
+        for (ks_table, ks_updates) in self.table.iter().zip(updates.0.into_iter()) {
+            for (mutex, row_updates) in ks_table.mutexes().iter().zip(ks_updates.into_iter()) {
+                let mut lock = mutex.lock();
+                for (entry, update) in lock.data.iter_mut().zip(row_updates.into_iter()) {
+                    let Some((data, position)) = update else {
+                        continue;
+                    };
+                    entry.maybe_set_to_clean(&data, position);
+                }
             }
         }
-        assert!(updates.next().is_none(), "Too many updates for large table");
     }
 
     /// Takes a next entry in the large table.
@@ -364,10 +339,11 @@ impl LargeTable {
     /// See Db::next_entry for documentation.
     pub fn next_entry<L: Loader>(
         &self,
+        ks: &KeySpaceDesc,
         mut cell: usize,
         mut next_key: Option<Bytes>,
         loader: &L,
-        max_cell_exclusive: usize,
+        max_cell_exclusive: Option<usize>,
     ) -> Result<
         Option<(
             Option<usize>, /*next cell*/
@@ -377,26 +353,29 @@ impl LargeTable {
         )>,
         L::Error,
     > {
+        let ks_table = self.ks_table(ks);
         loop {
-            let (row, offset) = Self::locate(cell);
-            let mut row = self.data.lock(row);
+            let (row, offset) = ks.locate_cell(cell);
+            let mut row = ks_table.lock(row);
             let entry = row.entry_mut(offset);
             // todo lru logic
             entry.maybe_load(loader)?;
             if let Some((key, value, next_key)) = entry.next_entry(next_key) {
                 let next_cell = if next_key.is_none() {
-                    self.next_cell(cell)
+                    ks.next_cell(cell)
                 } else {
                     Some(cell)
                 };
                 return Ok(Some((next_cell, next_key, key, value)));
             } else {
                 next_key = None;
-                let Some(next_cell) = self.next_cell(cell) else {
+                let Some(next_cell) = ks.next_cell(cell) else {
                     return Ok(None);
                 };
-                if next_cell >= max_cell_exclusive {
-                    return Ok(None);
+                if let Some(max_cell_exclusive) = max_cell_exclusive {
+                    if next_cell >= max_cell_exclusive {
+                        return Ok(None);
+                    }
                 }
                 cell = next_cell;
             }
@@ -406,14 +385,16 @@ impl LargeTable {
     /// See Db::last_in_range for documentation.
     pub fn last_in_range<L: Loader>(
         &self,
+        ks: &KeySpaceDesc,
         cell: usize,
         from_included: &Bytes,
         to_included: &Bytes,
         loader: &L,
     ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
         // todo duplicate code with next_entry(...)
-        let (row, offset) = Self::locate(cell);
-        let mut row = self.data.lock(row);
+        let (row, offset) = ks.locate_cell(cell);
+        let ks_table = self.ks_table(ks);
+        let mut row = ks_table.lock(row);
         let entry = row.entry_mut(offset);
         // todo lru logic
         entry.maybe_load(loader)?;
@@ -423,10 +404,12 @@ impl LargeTable {
 
     pub fn report_entries_state(&self) {
         let mut states: HashMap<_, i64> = HashMap::new();
-        for mutex in self.data.as_ref().as_ref() {
-            let lock = mutex.lock();
-            for entry in lock.data.iter() {
-                *states.entry(entry.state.name()).or_default() += 1;
+        for ks_table in &self.table {
+            for mutex in ks_table.mutexes() {
+                let lock = mutex.lock();
+                for entry in lock.data.iter() {
+                    *states.entry(entry.state.name()).or_default() += 1;
+                }
             }
         }
         for (label, value) in states {
@@ -437,28 +420,15 @@ impl LargeTable {
         }
     }
 
-    fn next_cell(&self, cell: usize) -> Option<usize> {
-        if cell >= self.config.large_table_size() - 1 {
-            None
-        } else {
-            Some(cell + 1)
-        }
-    }
-
-    pub(crate) fn locate(cell: usize) -> (usize, usize) {
-        // pub(crate) for tests
-        let mutex = cell % LARGE_TABLE_MUTEXES;
-        let offset = cell / LARGE_TABLE_MUTEXES;
-        (mutex, offset)
-    }
-
     #[cfg(test)]
     pub(crate) fn is_all_clean(&self) -> bool {
-        for mutex in self.data.as_ref().as_ref() {
-            let mut lock = mutex.lock();
-            for entry in lock.data.iter_mut() {
-                if entry.state.as_dirty_state().is_some() {
-                    return false;
+        for ks_table in &self.table {
+            for mutex in ks_table.mutexes() {
+                let mut lock = mutex.lock();
+                for entry in lock.data.iter_mut() {
+                    if entry.state.as_dirty_state().is_some() {
+                        return false;
+                    }
                 }
             }
         }
@@ -814,7 +784,7 @@ enum UnloadedState<'a> {
 }
 
 impl LargeTableSnapshot {
-    pub fn into_entries(self) -> Box<[LargeTableSnapshotEntry]> {
+    pub fn into_entries(self) -> LargeTableContainer<LargeTableSnapshotEntry> {
         self.data
     }
 
@@ -833,6 +803,57 @@ impl LargeTableSnapshot {
         } else {
             *u = Some(v);
         }
+    }
+}
+
+impl<T> LargeTableContainer<T> {
+    pub fn try_map<P, E>(self, f: impl Fn(T) -> Result<P, E>) -> Result<LargeTableContainer<P>, E> {
+        let mut new_container = Vec::with_capacity(self.0.len());
+        for ks_table in self.0.into_iter() {
+            let mut new_ks_table = Vec::with_capacity(ks_table.len());
+            for row in ks_table.into_iter() {
+                let mut new_row = Vec::with_capacity(row.len());
+                for element in row {
+                    let new_element = f(element)?;
+                    new_row.push(new_element);
+                }
+                new_ks_table.push(new_row);
+            }
+            new_container.push(new_ks_table);
+        }
+        Ok(LargeTableContainer(new_container))
+    }
+}
+
+impl<A, B> LargeTableContainer<(A, B)> {
+    pub fn unzip(self) -> (LargeTableContainer<A>, LargeTableContainer<B>) {
+        let (a, b) = self
+            .0
+            .into_iter()
+            .map(|ks_table| {
+                ks_table
+                    .into_iter()
+                    .map(|row| row.into_iter().unzip())
+                    .unzip()
+            })
+            .unzip();
+        (LargeTableContainer(a), LargeTableContainer(b))
+    }
+}
+
+impl<T: Copy> LargeTableContainer<T> {
+    /// Creates a new container with the given shape and filled with copy of passed value
+    pub fn new_from_key_shape(key_shape: &KeyShape, value: T) -> Self {
+        Self(
+            key_shape
+                .iter_ks()
+                .map(|ks| {
+                    (0..ks.num_mutexes())
+                        .map(|_| (0..ks.cells_per_mutex()).map(|_| value).collect())
+                        .collect()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -861,22 +882,21 @@ mod tests {
 
     #[test]
     fn test_ks_allocation() {
-        let mut config = Config::small();
-        config.large_table_size = 2048;
-        let mut ks = KeyShapeBuilder::new(2048, 1);
-        let a = ks.const_key_space("a", 0, 128);
-        let b = ks.const_key_space("b", 0, 128);
-        ks.const_key_space("c", 0, 2048 - 128 - 128);
+        let config = Config::small();
+        let mut ks = KeyShapeBuilder::new();
+        let a = ks.add_key_space("a", 0, 1, 1);
+        let b = ks.add_key_space("b", 0, 1, 1);
+        ks.add_key_space("c", 0, 1, 1);
         let ks = ks.build();
         let l = LargeTable::from_unloaded(
             &ks,
-            &[WalPosition::INVALID; 2048],
+            &LargeTableContainer::new_from_key_shape(&ks, WalPosition::INVALID),
             Arc::new(config),
             Metrics::new(),
         );
-        let (mut row, offset) = l.row(ks.cell(a, &[]));
+        let (mut row, offset) = l.row(ks.ks(a), &[]);
         assert_eq!(row.entry_mut(offset).ks.name(), "a");
-        let (mut row, offset) = l.row(ks.cell(b, &[5, 2, 3, 4]));
+        let (mut row, offset) = l.row(ks.ks(b), &[5, 2, 3, 4]);
         assert_eq!(row.entry_mut(offset).ks.name(), "b");
     }
 }

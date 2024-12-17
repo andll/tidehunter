@@ -1,20 +1,23 @@
 use crate::db::{Db, DbResult};
+use crate::key_shape::KeySpace;
 use minibytes::Bytes;
 use std::ops::Range;
 use std::sync::Arc;
 
 pub struct RangeOrderedIterator {
     db: Arc<Db>,
+    ks: KeySpace,
     cell: usize,
     next_key: Option<Bytes>,
     end_excluded: Bytes,
 }
 
 impl RangeOrderedIterator {
-    pub(crate) fn new(db: Arc<Db>, cell: usize, range: Range<Bytes>) -> Self {
+    pub(crate) fn new(db: Arc<Db>, ks: KeySpace, cell: usize, range: Range<Bytes>) -> Self {
         // db checks that range ends fit the same large table entry
         Self {
             db,
+            ks,
             cell,
             next_key: Some(range.start),
             end_excluded: range.end,
@@ -27,7 +30,10 @@ impl Iterator for RangeOrderedIterator {
 
     fn next(&mut self) -> Option<DbResult<(Bytes, Bytes)>> {
         let next_key = self.next_key.take()?;
-        match self.db.next_entry(self.cell, Some(next_key), self.cell + 1) {
+        match self
+            .db
+            .next_entry(self.ks, self.cell, Some(next_key), Some(self.cell + 1))
+        {
             Ok(Some((next_cell, next_key, key, value))) => {
                 if next_cell == Some(self.cell) {
                     self.next_key = if let Some(next_key) = next_key {

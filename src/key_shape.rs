@@ -1,11 +1,10 @@
-use crate::config::Config;
+use crate::control::ControlRegion;
+use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
-use crate::large_table::LARGE_TABLE_MUTEXES;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::cmp;
 use std::collections::BTreeMap;
-use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -14,11 +13,6 @@ pub struct KeyShape {
 }
 
 pub struct KeyShapeBuilder {
-    large_table_size: usize,
-    frac_base: usize,
-    const_spaces: usize,
-    frac_spaces: usize,
-    const_space_pad: usize,
     key_spaces: Vec<KeySpaceDesc>,
 }
 
@@ -30,7 +24,8 @@ pub(crate) struct KeySpaceDesc {
     id: KeySpace,
     name: String,
     key_size: usize,
-    range: Range<usize>,
+    mutexes: usize,
+    per_mutex: usize,
     config: KeySpaceConfig,
 }
 
@@ -45,107 +40,38 @@ pub struct KeySpaceConfig {
 pub type Compactor = Box<dyn Fn(&mut BTreeMap<Bytes, WalPosition>) + Sync + Send>;
 
 impl KeyShapeBuilder {
-    pub fn from_config(config: &Config, frac_base: usize) -> Self {
-        let large_table_size = config.large_table_size();
-        Self::new(large_table_size, frac_base)
+    pub fn new() -> Self {
+        Self { key_spaces: vec![] }
     }
 
-    pub fn new(large_table_size: usize, frac_base: usize) -> Self {
-        Self {
-            large_table_size,
-            const_spaces: 0,
-            frac_spaces: 0,
-            frac_base,
-            const_space_pad: 0,
-            key_spaces: vec![],
-        }
-    }
-
-    pub fn const_key_space(
+    pub fn add_key_space(
         &mut self,
         name: impl Into<String>,
         key_size: usize,
-        size: usize,
+        mutexes: usize,
+        per_mutex: usize,
     ) -> KeySpace {
-        self.const_key_space_config(name, key_size, size, KeySpaceConfig::default())
+        self.add_key_space_config(
+            name,
+            key_size,
+            mutexes,
+            per_mutex,
+            KeySpaceConfig::default(),
+        )
     }
 
-    /// round up const_spaces to a multiple of LARGE_TABLE_MUTEXES and return const_space size
-    pub fn pad_const_space(&mut self) -> usize {
-        let b = (self.const_spaces + LARGE_TABLE_MUTEXES - 1) / LARGE_TABLE_MUTEXES;
-        self.const_space_pad = b * LARGE_TABLE_MUTEXES;
-        self.const_space_pad
-    }
-
-    pub fn const_key_space_config(
+    pub fn add_key_space_config(
         &mut self,
         name: impl Into<String>,
         key_size: usize,
-        size: usize,
+        mutexes: usize,
+        per_mutex: usize,
         config: KeySpaceConfig,
     ) -> KeySpace {
         let name = name.into();
-        assert!(size > 0, "Key space size should be greater then 0");
-        assert!(
-            size + self.const_spaces <= self.large_table_size,
-            "Total key space size should not exceed configured large table size"
-        );
-        assert_eq!(
-            self.frac_spaces, 0,
-            "Should add all const key spaces before frac key space"
-        );
-        let start = self.const_spaces;
-        self.const_spaces += size;
-        let range = start..self.const_spaces;
-        self.add_key_space(name, key_size, range, config)
-    }
+        assert!(mutexes > 0, "mutexes should be greater then 0");
+        assert!(per_mutex > 0, "per_mutex should be greater then 0");
 
-    pub fn frac_key_space(
-        &mut self,
-        name: impl Into<String>,
-        key_size: usize,
-        frac: usize,
-    ) -> KeySpace {
-        self.frac_key_space_config(name, key_size, frac, KeySpaceConfig::default())
-    }
-
-    pub fn frac_key_space_config(
-        &mut self,
-        name: impl Into<String>,
-        key_size: usize,
-        frac: usize,
-        config: KeySpaceConfig,
-    ) -> KeySpace {
-        let name = name.into();
-        assert!(frac > 0, "Key space size should be greater then 0");
-        assert!(
-            frac + self.frac_spaces <= self.frac_base,
-            "Total frac key space size({}) should not exceed frac_base({})",
-            frac + self.frac_spaces,
-            self.frac_spaces
-        );
-        let total_frac_space = self.large_table_size - self.const_spaces;
-        let per_frac = total_frac_space / self.frac_base;
-        assert_eq!(
-            total_frac_space,
-            per_frac * self.frac_base,
-            "Total frac space ({total_frac_space}) is not divisible by requested frac_base({})",
-            self.frac_base
-        );
-        let start = self.const_spaces + self.frac_spaces * per_frac;
-        self.frac_spaces += frac;
-        let end = self.const_spaces + self.frac_spaces * per_frac;
-        let range = start..end;
-        self.add_key_space(name, key_size, range, config)
-    }
-
-    fn add_key_space(
-        &mut self,
-        name: String,
-        key_size: usize,
-        range: Range<usize>,
-        config: KeySpaceConfig,
-    ) -> KeySpace {
         assert!(
             self.key_spaces.len() < (u8::MAX - 1) as usize,
             "Maximum {} key spaces allowed",
@@ -155,48 +81,27 @@ impl KeyShapeBuilder {
             key_size <= MAX_KEY_LEN,
             "Specified key size exceeding max key length"
         );
+
         let ks = KeySpace(self.key_spaces.len() as u8);
         let key_space = KeySpaceDesc {
             id: ks,
             name,
             key_size,
-            range,
+            mutexes,
+            per_mutex,
             config,
         };
         self.key_spaces.push(key_space);
         ks
     }
 
-    pub fn build(mut self) -> KeyShape {
-        let last_key_space = self
-            .key_spaces
-            .last()
-            .expect("Can't create empty key shape");
-        if self.const_space_pad > 0 {
-            let pad_start = last_key_space.range.end;
-            let range = pad_start..(pad_start + self.const_space_pad);
-            self.add_key_space("pad".to_string(), 0, range, KeySpaceConfig::default());
-        }
-        self.check_no_overlap();
+    pub fn build(self) -> KeyShape {
         KeyShape {
             key_spaces: self.key_spaces,
         }
     }
-
-    fn check_no_overlap(&self) {
-        let mut last: Option<usize> = None;
-        for (i, ks) in self.key_spaces.iter().enumerate() {
-            if let Some(last) = last {
-                let start = ks.range.start;
-                assert!(
-                    start >= last,
-                    "Found overlap: ks {i} starting at {start}, previous ended at {last}"
-                );
-            }
-            last = Some(ks.range.end);
-        }
-    }
 }
+
 impl KeySpaceDesc {
     pub(crate) fn check_key(&self, k: &[u8]) {
         if k.len() != self.key_size {
@@ -213,31 +118,50 @@ impl KeySpaceDesc {
         self.cell_by_prefix(self.cell_prefix(k))
     }
 
+    pub(crate) fn locate(&self, k: &[u8]) -> (usize, usize) {
+        let prefix = self.cell_prefix(k);
+        let cell = self.cell_by_prefix(prefix);
+        self.locate_cell(cell)
+    }
+
+    pub(crate) fn locate_cell(&self, cell: usize) -> (usize, usize) {
+        let mutex = cell % self.num_mutexes();
+        let offset = cell / self.num_mutexes();
+        (mutex, offset)
+    }
+
+    pub fn num_mutexes(&self) -> usize {
+        self.mutexes
+    }
+
+    pub fn cells_per_mutex(&self) -> usize {
+        self.per_mutex
+    }
+
+    pub fn next_cell(&self, cell: usize) -> Option<usize> {
+        if cell >= self.num_cells() - 1 {
+            None
+        } else {
+            Some(cell + 1)
+        }
+    }
+
     pub(crate) fn key_size(&self) -> usize {
         self.key_size
     }
 
-    pub(crate) fn bucket(&self, k: &[u8]) -> usize {
-        let prefix = self.cell_prefix(k);
-        self.bucket_by_prefix(prefix)
-    }
-
-    pub(crate) fn num_buckets(&self) -> usize {
-        self.range.end - self.range.start
+    pub(crate) fn num_cells(&self) -> usize {
+        self.mutexes * self.per_mutex
     }
 
     fn cell_by_prefix(&self, prefix: u32) -> usize {
-        self.range.start + self.bucket_by_prefix(prefix)
-    }
-
-    fn bucket_by_prefix(&self, prefix: u32) -> usize {
         let prefix = prefix as u64;
         // this does not overflow: prefix <= u32::MAX, num_buckets <= u32::MAX
         // therefore, prefix * num_buckets < u64::MAX,
-        let bucket = prefix * (self.num_buckets() as u64) / (u32::MAX as u64);
+        let bucket = prefix * (self.num_cells() as u64) / (u32::MAX as u64);
         // no overflow even if usize==u32, since bucket is less than u32::MAX
         let bucket = bucket as usize;
-        debug_assert!(bucket < self.num_buckets());
+        debug_assert!(bucket < self.num_cells());
         bucket
     }
 
@@ -293,12 +217,13 @@ impl KeySpaceConfig {
 }
 
 impl KeyShape {
-    pub fn new_whole(key_size: usize, config: &Config) -> (Self, KeySpace) {
+    pub fn new_single(key_size: usize, mutexes: usize, per_mutex: usize) -> (Self, KeySpace) {
         let key_space = KeySpaceDesc {
             id: KeySpace(0),
             name: "root".into(),
             key_size,
-            range: 0..config.large_table_size,
+            mutexes,
+            per_mutex,
             config: Default::default(),
         };
         let key_spaces = vec![key_space];
@@ -310,10 +235,16 @@ impl KeyShape {
         self.ks(ks).cell(k)
     }
 
-    pub(crate) fn iter_ks_cells(&self) -> impl Iterator<Item = KeySpaceDesc> + '_ {
-        self.key_spaces
-            .iter()
-            .flat_map(|desc| desc.range.clone().into_iter().map(|_| desc.clone()))
+    pub(crate) fn iter_ks(&self) -> impl Iterator<Item = &KeySpaceDesc> + '_ {
+        self.key_spaces.iter()
+    }
+
+    pub(crate) fn num_ks(&self) -> usize {
+        self.key_spaces.len()
+    }
+
+    pub fn cr_len(&self) -> usize {
+        ControlRegion::len_bytes_from_key_shape(self) + CrcFrame::CRC_HEADER_LENGTH
     }
 
     pub(crate) fn range_cell(
@@ -325,11 +256,6 @@ impl KeyShape {
         self.ks(ks).range_cell(from_included, to_included)
     }
 
-    pub(crate) fn key_space_range(&self, ks: KeySpace) -> Range<usize> {
-        let ks = self.ks(ks);
-        ks.range.clone()
-    }
-
     pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
         let Some(key_space) = self.key_spaces.get(ks.0 as usize) else {
             panic!("Key space {} not found", ks.0)
@@ -338,17 +264,8 @@ impl KeyShape {
     }
 }
 
-#[test]
-fn test_ks_builder() {
-    let mut ksb = KeyShapeBuilder::new(1024 * 1024 + 1, 8);
-    let ks1 = ksb.const_key_space("a", 0, 1);
-    let ks2 = ksb.frac_key_space("b", 0, 1);
-    let ks3 = ksb.frac_key_space("c", 0, 2);
-    let shape = ksb.build();
-    assert_eq!(0..1, shape.key_space_range(ks1));
-    assert_eq!(1..(1 + 1024 * 1024 / 8), shape.key_space_range(ks2));
-    assert_eq!(
-        (1 + 1024 * 1024 / 8)..(1 + 1024 * 1024 / 8 * 3),
-        shape.key_space_range(ks3)
-    );
+impl KeySpace {
+    pub(crate) fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
 }

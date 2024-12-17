@@ -7,7 +7,7 @@ use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{
-    LargeTable, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
+    LargeTable, LargeTableContainer, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
 use crate::metrics::Metrics;
 use crate::wal::{
@@ -52,7 +52,7 @@ impl Db {
             .create(true)
             .open(path.join("cr"))?;
         let (control_region_store, control_region) =
-            Self::read_or_create_control_region(&cr, &config)?;
+            Self::read_or_create_control_region(&cr, &key_shape)?;
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
@@ -104,19 +104,20 @@ impl Db {
 
     fn read_or_create_control_region(
         cr: &File,
-        config: &Config,
+        key_shape: &KeyShape,
     ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
         let file_len = cr.metadata()?.len() as usize;
-        let cr_len = config.cr_len();
+        let cr_len = key_shape.cr_len();
+        println!("cr_len {cr_len}");
         let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(cr)? };
         let (last_written_left, control_region) = if file_len != cr_len * 2 {
             cr.set_len((cr_len * 2) as u64)?;
             let skip_marker = CrcFrame::skip_marker();
             cr_map[0..skip_marker.len_with_header()].copy_from_slice(skip_marker.as_ref());
             cr_map.flush()?;
-            (false, ControlRegion::new_empty(config.large_table_size()))
+            (false, ControlRegion::new_empty(key_shape))
         } else {
-            Self::read_control_region(&cr_map, config)?
+            Self::read_control_region(&cr_map, key_shape)?
         };
         let control_region_store = ControlRegionStore {
             cr_map,
@@ -128,9 +129,9 @@ impl Db {
 
     fn read_control_region(
         cr_map: &MmapMut,
-        config: &Config,
+        key_shape: &KeyShape,
     ) -> Result<(bool, ControlRegion), DbError> {
-        let cr_len = config.cr_len();
+        let cr_len = key_shape.cr_len();
         assert_eq!(cr_map.len(), cr_len * 2);
         let cr1 = CrcFrame::read_from_slice(&cr_map, 0);
         let cr2 = CrcFrame::read_from_slice(&cr_map, cr_len);
@@ -148,11 +149,11 @@ impl Db {
             }
             // Cr region is valid but empty
             (Err(CrcReadError::SkipMarker), Err(_)) => {
-                return Ok((false, ControlRegion::new_empty(config.large_table_size())))
+                return Ok((false, ControlRegion::new_empty(key_shape)))
             }
             (Err(_), Err(_)) => return Err(DbError::CrCorrupted),
         };
-        let control_region = ControlRegion::from_slice(&cr, config.large_table_size());
+        let control_region = ControlRegion::from_slice(&cr, key_shape);
         Ok((last_written_left, control_region))
     }
 
@@ -181,8 +182,10 @@ impl Db {
             .with_label_values(&["tombstone"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
-        let cell = self.key_shape.cell(ks, &k);
-        Ok(self.large_table.read().remove(cell, k, position, self)?)
+        Ok(self
+            .large_table
+            .read()
+            .remove(self.key_shape.ks(ks), k, position, self)?)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -223,8 +226,7 @@ impl Db {
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
             self.key_shape.ks(ks).check_key(&k);
-            let cell = self.key_shape.cell(ks, &k);
-            lock.remove(cell, k, position, self)?;
+            lock.remove(self.key_shape.ks(ks), k, position, self)?;
             last_position = position;
         }
         if last_position != WalPosition::INVALID {
@@ -236,9 +238,9 @@ impl Db {
         Ok(())
     }
 
-    /// Unordered iterator over entire database
+    /// Unordered iterator over entire key space
     pub fn unordered_iterator(self: &Arc<Self>, ks: KeySpace) -> UnorderedIterator {
-        UnorderedIterator::new(self.clone(), self.key_shape.key_space_range(ks))
+        UnorderedIterator::new(self.clone(), ks)
     }
 
     /// Ordered iterator over a pre-defined range of keys.
@@ -252,7 +254,7 @@ impl Db {
     ) -> RangeOrderedIterator {
         // todo (fix) technically with Range<Bytes> end of the range is exclusive
         let cell = self.key_shape.range_cell(ks, &range.start, &range.end);
-        RangeOrderedIterator::new(self.clone(), cell, range)
+        RangeOrderedIterator::new(self.clone(), ks, cell, range)
     }
 
     /// Returns last key-value pair in the given range, where both ends of the range are included
@@ -266,10 +268,11 @@ impl Db {
         to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
         let cell = self.key_shape.range_cell(ks, from_included, to_included);
+        let ks = self.key_shape.ks(ks);
         let Some((key, position)) =
             self.large_table
                 .read()
-                .last_in_range(cell, from_included, to_included, self)?
+                .last_in_range(ks, cell, from_included, to_included, self)?
         else {
             return Ok(None);
         };
@@ -307,9 +310,10 @@ impl Db {
     /// As such, the returned key might not match the value passed in the next_key.
     pub(crate) fn next_entry(
         &self,
+        ks: KeySpace,
         cell: usize,
         next_key: Option<Bytes>,
-        max_cell_exclusive: usize,
+        max_cell_exclusive: Option<usize>,
     ) -> DbResult<
         Option<(
             Option<usize>, /*next cell*/
@@ -318,10 +322,11 @@ impl Db {
             Bytes,         /*fetched value*/
         )>,
     > {
+        let ks = self.key_shape.ks(ks);
         let Some((next_cell, next_key, key, wal_position)) =
             self.large_table
                 .read()
-                .next_entry(cell, next_key, self, max_cell_exclusive)?
+                .next_entry(ks, cell, next_key, self, max_cell_exclusive)?
         else {
             return Ok(None);
         };
@@ -380,8 +385,7 @@ impl Db {
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
-                    let cell = key_shape.cell(ks, &k);
-                    large_table.remove(cell, k, position, wal_iterator.wal())?;
+                    large_table.remove(key_shape.ks(ks), k, position, wal_iterator.wal())?;
                 }
             }
         }
@@ -399,35 +403,35 @@ impl Db {
         crs.store(snapshot, last_added_position)
     }
 
-    fn write_snapshot(&self, snapshot: LargeTableSnapshot) -> DbResult<Box<[WalPosition]>> {
-        let iter = Box::into_iter(snapshot.into_entries());
-        let mut index_updates = vec![];
-        let snapshot = iter
-            .map(|entry| match entry {
-                LargeTableSnapshotEntry::Empty => {
-                    index_updates.push(None);
-                    Ok(WalPosition::INVALID)
-                }
-                LargeTableSnapshotEntry::Clean(pos) => {
-                    index_updates.push(None);
-                    Ok(pos)
-                }
-                LargeTableSnapshotEntry::Dirty(ks, index) => {
-                    let position = self.write_index(ks, &index)?;
-                    index_updates.push(Some((index, position)));
-                    Ok(position)
-                }
-                LargeTableSnapshotEntry::DirtyUnloaded(ks, pos, index) => {
-                    let mut clean = self.load(self.key_shape.ks(ks), pos)?;
-                    clean.merge_dirty(&index);
-                    let position = self.write_index(ks, &clean)?;
-                    index_updates.push(Some((index, position)));
-                    Ok(position)
-                }
-            })
-            .collect::<DbResult<Box<[WalPosition]>>>()?;
+    fn write_snapshot(
+        &self,
+        snapshot: LargeTableSnapshot,
+    ) -> DbResult<LargeTableContainer<WalPosition>> {
+        let entries = snapshot.into_entries();
+        let snapshot_and_updates = entries.try_map(|entry| self.write_entry_snapshot(entry))?;
+        let (snapshot, index_updates) = snapshot_and_updates.unzip();
         self.large_table.read().maybe_update_entries(index_updates);
         Ok(snapshot)
+    }
+
+    fn write_entry_snapshot(
+        &self,
+        entry: LargeTableSnapshotEntry,
+    ) -> DbResult<(WalPosition, Option<(Arc<IndexTable>, WalPosition)>)> {
+        match entry {
+            LargeTableSnapshotEntry::Empty => Ok((WalPosition::INVALID, None)),
+            LargeTableSnapshotEntry::Clean(pos) => Ok((pos, None)),
+            LargeTableSnapshotEntry::Dirty(ks, index) => {
+                let position = self.write_index(ks, &index)?;
+                Ok((position, Some((index, position))))
+            }
+            LargeTableSnapshotEntry::DirtyUnloaded(ks, pos, index) => {
+                let mut clean = self.load(self.key_shape.ks(ks), pos)?;
+                clean.merge_dirty(&index);
+                let position = self.write_index(ks, &clean)?;
+                Ok((position, Some((index, position))))
+            }
+        }
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
@@ -470,7 +474,7 @@ struct ControlRegionStore {
 impl ControlRegionStore {
     pub fn store(
         &mut self,
-        snapshot: Box<[WalPosition]>,
+        snapshot: LargeTableContainer<WalPosition>,
         last_position: WalPosition,
     ) -> DbResult<()> {
         let control_region = ControlRegion::new(snapshot, self.increment_version(), last_position);
@@ -646,7 +650,7 @@ mod test {
     fn db_test() {
         let dir = tempdir::TempDir::new("test-wal").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(4, &config);
+        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Db::open(
                 dir.path(),
@@ -723,7 +727,7 @@ mod test {
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(4, &config);
+        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
         let mut batch = WriteBatch::new();
         batch.write(ks, vec![5, 6, 7, 8], vec![15]);
@@ -737,7 +741,7 @@ mod test {
     fn test_remove() {
         let dir = tempdir::TempDir::new("test-remove").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(4, &config);
+        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Db::open(
                 dir.path(),
@@ -789,7 +793,7 @@ mod test {
     fn test_unordered_iterator() {
         let dir = tempdir::TempDir::new("test-unordered-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(4, &config);
+        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
         {
             let db = Arc::new(
                 Db::open(
@@ -834,7 +838,7 @@ mod test {
     fn test_ordered_iterator() {
         let dir = tempdir::TempDir::new("test-ordered-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(5, &config);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
         {
             let db = Arc::new(
                 Db::open(
@@ -899,7 +903,7 @@ mod test {
     fn test_empty() {
         let dir = tempdir::TempDir::new("test-empty").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(5, &config);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
         {
             let db = Arc::new(
                 Db::open(
@@ -932,11 +936,11 @@ mod test {
     fn test_small_keys() {
         let dir = tempdir::TempDir::new("test-small-keys").unwrap();
         let config = Arc::new(Config::small());
-        let mut ksb = KeyShapeBuilder::from_config(&config, 4);
-        let ks0 = ksb.frac_key_space("a", 0, 1);
-        let ks1 = ksb.frac_key_space("b", 1, 1);
-        let ks2 = ksb.frac_key_space("c", 2, 1);
-        let _ks3 = ksb.frac_key_space("d", 3, 1);
+        let mut ksb = KeyShapeBuilder::new();
+        let ks0 = ksb.add_key_space("a", 0, 12, 12);
+        let ks1 = ksb.add_key_space("b", 1, 12, 12);
+        let ks2 = ksb.add_key_space("c", 2, 12, 12);
+        let _ks3 = ksb.add_key_space("d", 3, 12, 12);
         let key_shape = ksb.build();
         {
             let db = Arc::new(
@@ -975,7 +979,7 @@ mod test {
     fn test_last_in_range() {
         let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_whole(5, &config);
+        let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
         let db = Arc::new(
             Db::open(
                 dir.path(),
@@ -1015,15 +1019,13 @@ mod test {
     // this is an expensive test, use it if strategy around narrow lookup changes
     pub fn test_narrow_lookup() {
         let dir = tempdir::TempDir::new("test-narrow-lookup").unwrap();
-        let mut config = Config::small();
+        let config = Config::small();
         const BUCKETS: usize = 256;
         const PER_BUCKET: usize = 1024;
         const KEY_SIZE: usize = 4;
-        config.large_table_size = 1024;
         let config = Arc::new(config);
-        let mut ksb = KeyShapeBuilder::new(config.large_table_size, 1);
-        let ks = ksb.const_key_space("a", KEY_SIZE, BUCKETS);
-        ksb.pad_const_space();
+        let mut ksb = KeyShapeBuilder::new();
+        let ks = ksb.add_key_space("a", KEY_SIZE, 16, BUCKETS / 16);
         let key_shape = ksb.build();
         let mut rng = ThreadRng::default();
         let mut keys = Vec::with_capacity(BUCKETS * PER_BUCKET);
@@ -1079,9 +1081,8 @@ mod test {
         let mut config = Config::small();
         config.max_dirty_keys = 2;
         config.max_loaded_entries = 1;
-        config.large_table_size = 2 * crate::large_table::LARGE_TABLE_MUTEXES;
         let config = Arc::new(config);
-        let (key_shape, ks) = KeyShape::new_whole(5, &config);
+        let (key_shape, ks) = KeyShape::new_single(5, 2, 1024);
         #[track_caller]
         fn check_all(db: &Db, ks: KeySpace, last: u8) {
             for i in 5u8..=last {
@@ -1147,8 +1148,9 @@ mod test {
             {
                 // todo this code predates KS api so we calculate cells manually
                 // todo rewrite with using ks API instead
-                let (mutex1, cell1) = LargeTable::locate(db.key_shape.cell(ks, &other_key));
-                let (mutex2, cell2) = LargeTable::locate(db.key_shape.cell(ks, &[1, 2, 3, 4, 5]));
+                let ksd = db.key_shape.ks(ks);
+                let (mutex1, cell1) = ksd.locate(&other_key);
+                let (mutex2, cell2) = ksd.locate(&[1, 2, 3, 4, 5]);
                 assert_eq!(mutex1, mutex2);
                 assert_ne!(cell1, cell2);
                 // code below is needed to search for other_key
