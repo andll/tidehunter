@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::index_table::IndexTable;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
-use crate::lookup::Lookup;
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
@@ -187,37 +186,12 @@ impl LargeTable {
             LargeTableEntryState::Unloaded(position) => position,
         };
         let index_reader = loader.index_reader(index_position)?;
-        let mut lookup = Lookup::new(
-            index_reader,
-            entry.ks.key_size(),
-            IndexTable::element_size(&entry.ks),
-        );
-        // See test_narrow_lookup in db.rs for details
-        // Commenting this line reduces narrow lookup success rate from 100% to 10%
-        lookup.with_key_range(entry.ks.num_cells(), entry.ks.cell(k));
-        let result = lookup.lookup(k);
-
+        let result = IndexTable::lookup_unloaded(ks, &index_reader, k);
         self.metrics
             .lookup
             .with_label_values(&[entry.ks.name()])
             .inc();
-        if result.narrow_lookup_success {
-            self.metrics
-                .narrow_lookup_success
-                .with_label_values(&[entry.ks.name()])
-                .inc();
-        }
-        self.metrics
-            .lookup_read
-            .with_label_values(&[entry.ks.name()])
-            .inc_by(result.reads as u64);
-
-        if let Some(result) = result.result {
-            let position = WalPosition::from_slice(&result[ks.key_size()..]);
-            Ok(Some(position))
-        } else {
-            Ok(None)
-        }
+        Ok(result)
     }
 
     pub fn is_empty(&self) -> bool {

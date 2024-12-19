@@ -142,7 +142,7 @@ impl ControlRegion {
 fn test_control_region_serialization() {
     use crate::crc::CrcFrame;
 
-    let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
+    let (key_shape, _) = KeyShape::new_single(4, 12, 12);
     let cr = ControlRegion::new_empty(&key_shape);
     let mut bytes = BytesMut::new();
     cr.write_into_bytes(&mut bytes);

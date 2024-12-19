@@ -8,6 +8,7 @@ pub mod iterators;
 mod key_shape;
 mod large_table;
 mod lookup;
+mod math;
 pub mod metrics;
 mod primitives;
 #[cfg(feature = "stress")]

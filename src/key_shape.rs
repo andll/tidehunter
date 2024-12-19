@@ -1,10 +1,12 @@
 use crate::control::ControlRegion;
 use crate::crc::CrcFrame;
 use crate::db::MAX_KEY_LEN;
+use crate::math::downscale_u32;
 use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::cmp;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -114,10 +116,6 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn cell(&self, k: &[u8]) -> usize {
-        self.cell_by_prefix(self.cell_prefix(k))
-    }
-
     pub(crate) fn locate(&self, k: &[u8]) -> (usize, usize) {
         let prefix = self.cell_prefix(k);
         let cell = self.cell_by_prefix(prefix);
@@ -154,23 +152,29 @@ impl KeySpaceDesc {
         self.mutexes * self.per_mutex
     }
 
-    fn cell_by_prefix(&self, prefix: u32) -> usize {
-        let prefix = prefix as u64;
-        // this does not overflow: prefix <= u32::MAX, num_buckets <= u32::MAX
-        // therefore, prefix * num_buckets < u64::MAX,
-        let bucket = prefix * (self.num_cells() as u64) / (u32::MAX as u64);
-        // no overflow even if usize==u32, since bucket is less than u32::MAX
-        let bucket = bucket as usize;
-        debug_assert!(bucket < self.num_cells());
+    pub(crate) fn cell_by_prefix(&self, prefix: u32) -> usize {
+        let bucket = downscale_u32(prefix, self.num_cells() as u32) as usize;
         bucket
     }
 
-    fn cell_prefix(&self, k: &[u8]) -> u32 {
+    pub(crate) fn cell_prefix(&self, k: &[u8]) -> u32 {
         let k = &k[self.config.key_offset..];
         let copy = cmp::min(k.len(), 4);
         let mut p = [0u8; 4];
         p[..copy].copy_from_slice(&k[..copy]);
         u32::from_be_bytes(p)
+    }
+
+    pub(crate) fn cell_prefix_range(&self, cell: usize) -> Range<u64> {
+        let cell = cell as u64;
+        let cell_size = self.cell_size();
+        cell * cell_size..((cell + 1) * cell_size)
+    }
+
+    pub(crate) fn cell_size(&self) -> u64 {
+        let cells = self.num_cells() as u64;
+        // If you have only 1 cell, it has u32::MAX+1 elements,
+        (u32::MAX as u64 + 1) / cells
     }
 
     /// Returns the cell containing the range.
@@ -229,10 +233,6 @@ impl KeyShape {
         let key_spaces = vec![key_space];
         let this = Self { key_spaces };
         (this, KeySpace(0))
-    }
-
-    pub(crate) fn cell(&self, ks: KeySpace, k: &[u8]) -> usize {
-        self.ks(ks).cell(k)
     }
 
     pub(crate) fn iter_ks(&self) -> impl Iterator<Item = &KeySpaceDesc> + '_ {

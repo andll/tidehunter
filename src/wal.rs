@@ -550,6 +550,11 @@ impl WalPosition {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_value(v: u64) -> Self {
+        Self(v)
+    }
 }
 
 #[allow(dead_code)]

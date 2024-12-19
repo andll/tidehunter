@@ -642,8 +642,6 @@ impl From<bincode::Error> for DbError {
 mod test {
     use super::*;
     use crate::key_shape::KeyShapeBuilder;
-    use rand::rngs::ThreadRng;
-    use rand::RngCore;
     use std::collections::HashSet;
 
     #[test]
@@ -1012,67 +1010,6 @@ mod test {
                 .unwrap(),
             None
         );
-    }
-
-    #[test]
-    // #[ignore]
-    // this is an expensive test, use it if strategy around narrow lookup changes
-    pub fn test_narrow_lookup() {
-        let dir = tempdir::TempDir::new("test-narrow-lookup").unwrap();
-        let config = Config::small();
-        const BUCKETS: usize = 256;
-        const PER_BUCKET: usize = 1024;
-        const KEY_SIZE: usize = 4;
-        let config = Arc::new(config);
-        let mut ksb = KeyShapeBuilder::new();
-        let ks = ksb.add_key_space("a", KEY_SIZE, 16, BUCKETS / 16);
-        let key_shape = ksb.build();
-        let mut rng = ThreadRng::default();
-        let mut keys = Vec::with_capacity(BUCKETS * PER_BUCKET);
-        {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
-            for _ in 0..BUCKETS * PER_BUCKET {
-                let mut k = vec![0u8; KEY_SIZE];
-                rng.fill_bytes(&mut k);
-                keys.push(k.clone());
-                db.insert(ks, k, vec![]).unwrap();
-            }
-            db.rebuild_control_region().unwrap();
-        }
-        {
-            let metrics = Metrics::new();
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    metrics.clone(),
-                )
-                .unwrap(),
-            );
-            for key in keys {
-                db.get(ks, &key).unwrap().unwrap();
-            }
-            let lookups = metrics.lookup.with_label_values(&["a"]).get();
-            let success = metrics
-                .narrow_lookup_success
-                .with_label_values(&["a"])
-                .get();
-            let rate_pct = (success as f64 / lookups as f64) * 100.;
-            println!("L {} S{}, success rate {:.0}%", lookups, success, rate_pct);
-            assert!(
-                rate_pct > 99.,
-                "Narrow lookup success rate must be at least 99% if everything setup correctly"
-            );
-        }
     }
 
     #[test]
