@@ -164,6 +164,9 @@ impl IndexTable {
         let mut header_element = &header_element[..];
         let from_offset = header_element.get_u32() as usize;
         let to_offset = header_element.get_u32() as usize;
+        if from_offset == 0 && to_offset == 0 {
+            return None;
+        }
         let buffer = reader.read(from_offset..to_offset);
         let mut buffer = &buffer[..];
         let element_size = Self::element_size(ks);
