@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct LargeTable {
     table: Vec<ShardedMutex<Row>>,
@@ -185,12 +186,14 @@ impl LargeTable {
             }
             LargeTableEntryState::Unloaded(position) => position,
         };
+
+        let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
         let result = IndexTable::lookup_unloaded(ks, &index_reader, k);
         self.metrics
-            .lookup
-            .with_label_values(&[entry.ks.name()])
-            .inc();
+            .lookup_mcs
+            .with_label_values(&[index_reader.kind_str(), entry.ks.name()])
+            .observe(now.elapsed().as_micros() as f64);
         Ok(result)
     }
 

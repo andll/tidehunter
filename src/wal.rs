@@ -469,6 +469,15 @@ impl WalIterator {
     }
 }
 
+impl WalRandomRead<'_> {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            WalRandomRead::Mapped(_) => "mapped",
+            WalRandomRead::File(_) => "syscall",
+        }
+    }
+}
+
 impl RandomRead for WalRandomRead<'_> {
     fn read(&self, range: Range<usize>) -> Bytes {
         match self {
