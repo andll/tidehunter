@@ -1,4 +1,6 @@
 use parking_lot::{Mutex, MutexGuard};
+use prometheus::Histogram;
+use std::time::Instant;
 
 pub struct ShardedMutex<V>(Box<[Mutex<V>]>);
 
@@ -8,8 +10,15 @@ impl<V> ShardedMutex<V> {
         Self(arr)
     }
 
-    pub fn lock(&self, n: usize) -> MutexGuard<'_, V> {
-        self.0[n % self.0.len()].lock()
+    pub fn lock(&self, n: usize, metric: &Histogram) -> MutexGuard<'_, V> {
+        let mutex = &self.0[n % self.0.len()];
+        if let Some(lock) = mutex.try_lock() {
+            return lock;
+        }
+        let now = Instant::now();
+        let lock = mutex.lock();
+        metric.observe(now.elapsed().as_micros() as f64);
+        lock
     }
 
     pub fn mutexes(&self) -> &[Mutex<V>] {

@@ -20,6 +20,9 @@ pub struct Metrics {
     pub loaded_keys: IntGaugeVec,
 
     pub lookup_mcs: HistogramVec,
+
+    pub large_table_contention: HistogramVec,
+    pub wal_contention: Histogram,
 }
 
 #[macro_export]
@@ -40,11 +43,11 @@ macro_rules! gauge_vec (
 );
 #[macro_export]
 macro_rules! histogram (
-    ($name:expr, $buck:expr, $r:expr) => {prometheus::register_histogram_with_registry!($name, $name, $buck.unwrap(), $r).unwrap()}
+    ($name:expr, $buck:expr, $r:expr) => {prometheus::register_histogram_with_registry!($name, $name, $buck, $r).unwrap()}
 );
 #[macro_export]
 macro_rules! histogram_vec (
-    ($name:expr, $labels:expr, $buck:expr, $r:expr) => {prometheus::register_histogram_vec_with_registry!($name, $name, $labels, $buck.unwrap(), $r).unwrap()};
+    ($name:expr, $labels:expr, $buck:expr, $r:expr) => {prometheus::register_histogram_vec_with_registry!($name, $name, $labels, $buck, $r).unwrap()};
 );
 impl Metrics {
     pub fn new() -> Arc<Self> {
@@ -52,8 +55,9 @@ impl Metrics {
     }
 
     pub fn new_in(registry: &Registry) -> Arc<Self> {
-        let index_size_buckets = exponential_buckets(100., 2., 20);
-        let lookup_buckets = exponential_buckets(10., 2., 12);
+        let index_size_buckets = exponential_buckets(100., 2., 20).unwrap();
+        let lookup_buckets = exponential_buckets(10., 2., 12).unwrap();
+        let lock_buckets = exponential_buckets(1., 2., 12).unwrap();
         let this = Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
             max_index_size: AtomicUsize::new(0),
@@ -68,7 +72,19 @@ impl Metrics {
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
             loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
 
-            lookup_mcs: histogram_vec!("lookup_mcs", &["type", "ks"], lookup_buckets, registry),
+            lookup_mcs: histogram_vec!(
+                "lookup_mcs",
+                &["type", "ks"],
+                lookup_buckets.clone(),
+                registry
+            ),
+            large_table_contention: histogram_vec!(
+                "large_table_contention",
+                &["ks"],
+                lock_buckets.clone(),
+                registry
+            ),
+            wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)

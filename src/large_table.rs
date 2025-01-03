@@ -248,7 +248,13 @@ impl LargeTable {
     fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
         let ks_table = self.ks_table(ks);
         let (mutex, offset) = ks.locate(k);
-        let row = ks_table.lock(mutex);
+        let row = ks_table.lock(
+            mutex,
+            &self
+                .metrics
+                .large_table_contention
+                .with_label_values(&[ks.name()]),
+        );
         (row, offset)
     }
 
@@ -333,7 +339,13 @@ impl LargeTable {
         let ks_table = self.ks_table(ks);
         loop {
             let (row, offset) = ks.locate_cell(cell);
-            let mut row = ks_table.lock(row);
+            let mut row = ks_table.lock(
+                row,
+                &self
+                    .metrics
+                    .large_table_contention
+                    .with_label_values(&[ks.name()]),
+            );
             let entry = row.entry_mut(offset);
             // todo lru logic
             entry.maybe_load(loader)?;
@@ -371,7 +383,13 @@ impl LargeTable {
         // todo duplicate code with next_entry(...)
         let (row, offset) = ks.locate_cell(cell);
         let ks_table = self.ks_table(ks);
-        let mut row = ks_table.lock(row);
+        let mut row = ks_table.lock(
+            row,
+            &self
+                .metrics
+                .large_table_contention
+                .with_label_values(&[ks.name()]),
+        );
         let entry = row.entry_mut(offset);
         // todo lru logic
         entry.maybe_load(loader)?;

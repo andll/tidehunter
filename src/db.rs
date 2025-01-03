@@ -59,7 +59,7 @@ impl Db {
             config.clone(),
             metrics.clone(),
         );
-        let wal = Wal::open(&path.join("wal"), config.wal_layout())?;
+        let wal = Wal::open(&path.join("wal"), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let large_table = RwLock::new(large_table);

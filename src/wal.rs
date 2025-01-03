@@ -1,5 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::lookup::{FileRange, RandomRead};
+use crate::metrics::Metrics;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use bytes::{Buf, BufMut, BytesMut};
@@ -29,6 +30,7 @@ pub struct Wal {
     file: File,
     layout: WalLayout,
     maps: MapMutex,
+    metrics: Arc<Metrics>,
 }
 
 pub struct WalIterator {
@@ -200,21 +202,22 @@ const fn align(l: u64) -> u64 {
 }
 
 impl Wal {
-    pub fn open(p: &Path, layout: WalLayout) -> io::Result<Arc<Self>> {
+    pub fn open(p: &Path, layout: WalLayout, metrics: Arc<Metrics>) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .open(p)?;
-        Ok(Self::from_file(file, layout))
+        Ok(Self::from_file(file, layout, metrics))
     }
 
-    fn from_file(file: File, layout: WalLayout) -> Arc<Self> {
+    fn from_file(file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Arc<Self> {
         let reader = Wal {
             file,
             layout,
             maps: ShardedMutex::new_default_array::<MAP_MUTEXES>(),
+            metrics,
         };
         Arc::new(reader)
     }
@@ -295,7 +298,7 @@ impl Wal {
     }
 
     fn get_map(&self, id: u64) -> Option<Map> {
-        let mut maps = self.maps.lock(id as usize);
+        let mut maps = self.maps.lock(id as usize, &self.metrics.wal_contention);
         let map = maps.maps.get(&id)?.clone();
         maps.lru.insert(id);
         // do not try to unload since we did not load anything
@@ -303,7 +306,7 @@ impl Wal {
     }
 
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
-        let mut maps = self.maps.lock(id as usize);
+        let mut maps = self.maps.lock(id as usize, &self.metrics.wal_contention);
         let map = match maps.maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
@@ -602,7 +605,7 @@ mod tests {
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
-            let wal = Wal::open(&file, layout.clone()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let writer = wal
                 .wal_iterator(WalPosition::INVALID)
                 .unwrap()
@@ -621,7 +624,7 @@ mod tests {
             assert_eq!(&large, data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
@@ -636,7 +639,7 @@ mod tests {
             assert_eq!(&[91, 92, 93], data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
@@ -649,7 +652,7 @@ mod tests {
             // after wal_iterator is dropped, cleanup should free all memory
             assert_eq!(wal.cleanup(), 0);
             drop(wal);
-            let wal = Wal::open(&file, layout.clone()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
             assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
