@@ -24,7 +24,6 @@ pub struct WalWriter {
     position: AtomicWalPosition,
 }
 
-// todo periodically clear maps
 pub struct Wal {
     file: File,
     layout: WalLayout,
