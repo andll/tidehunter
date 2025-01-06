@@ -14,6 +14,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use std::{io, mem};
 
 #[derive(Clone)]
@@ -271,7 +272,17 @@ impl Wal {
     }
 
     fn get_map(&self, id: u64) -> Option<Map> {
-        let maps = self.maps.read();
+        let maps = match self.maps.try_read() {
+            Some(maps) => maps,
+            None => {
+                let now = Instant::now();
+                let maps = self.maps.read();
+                self.metrics
+                    .wal_contention
+                    .observe(now.elapsed().as_micros() as f64);
+                maps
+            }
+        };
         maps.get(&id).cloned()
     }
 
