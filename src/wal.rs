@@ -1,15 +1,13 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::Metrics;
-use crate::primitives::lru::Lru;
-use crate::primitives::sharded_mutex::ShardedMutex;
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::MmapMut;
 use minibytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
@@ -29,7 +27,7 @@ pub struct WalWriter {
 pub struct Wal {
     file: File,
     layout: WalLayout,
-    maps: MapMutex,
+    maps: RwLock<BTreeMap<u64, Map>>,
     metrics: Arc<Metrics>,
 }
 
@@ -45,15 +43,6 @@ struct Map {
     data: Bytes,
     writeable: bool,
 }
-
-#[derive(Default)]
-struct Maps {
-    maps: HashMap<u64, Map>,
-    lru: Lru,
-}
-
-const MAP_MUTEXES: usize = 8;
-type MapMutex = ShardedMutex<Maps>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct WalPosition(u64);
@@ -148,17 +137,6 @@ impl WalLayout {
             align(self.frag_size),
             "Frag size not aligned"
         );
-        // todo - it makes more sense to round up/auto-correct config rather then panic here
-        assert_eq!(
-            self.max_maps % MAP_MUTEXES,
-            0,
-            "max_maps should be dividable by MAP_MUTEXES"
-        );
-        assert!(
-            self.max_maps_per_mutex() > 1,
-            "max_maps / MAP_MUTEXES should be at least 2, currently {}",
-            self.max_maps_per_mutex()
-        );
     }
 
     /// Allocate the next position.
@@ -189,11 +167,6 @@ impl WalLayout {
         let end = self.frag_size * (map + 1);
         start..end
     }
-
-    #[inline]
-    fn max_maps_per_mutex(&self) -> usize {
-        self.max_maps / MAP_MUTEXES
-    }
 }
 
 const fn align(l: u64) -> u64 {
@@ -216,7 +189,7 @@ impl Wal {
         let reader = Wal {
             file,
             layout,
-            maps: ShardedMutex::new_default_array::<MAP_MUTEXES>(),
+            maps: Default::default(),
             metrics,
         };
         Arc::new(reader)
@@ -298,16 +271,13 @@ impl Wal {
     }
 
     fn get_map(&self, id: u64) -> Option<Map> {
-        let mut maps = self.maps.lock(id as usize, &self.metrics.wal_contention);
-        let map = maps.maps.get(&id)?.clone();
-        maps.lru.insert(id);
-        // do not try to unload since we did not load anything
-        Some(map)
+        let maps = self.maps.read();
+        maps.get(&id).cloned()
     }
 
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
-        let mut maps = self.maps.lock(id as usize, &self.metrics.wal_contention);
-        let map = match maps.maps.entry(id) {
+        let mut maps = self.maps.write();
+        let map = match maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
                 let data = unsafe {
@@ -338,9 +308,8 @@ impl Wal {
             }
         };
         let map = map.clone();
-        maps.lru.insert(id);
-        if maps.maps.len() > self.layout.max_maps_per_mutex() {
-            maps.try_unload_one();
+        if maps.len() > self.layout.max_maps {
+            maps.pop_first();
         }
         Ok(map)
     }
@@ -375,57 +344,6 @@ impl Wal {
             iterator.next()?;
         }
         Ok(iterator)
-    }
-
-    // Attempts cleaning internal mem maps, returning number of retained maps
-    // Map can be freed when all buffers linked to this portion of a file are dropped
-    pub fn cleanup(&self) -> usize {
-        let mut len = 0;
-        for maps in self.maps.as_ref() {
-            len += maps.lock().cleanup();
-        }
-        len
-    }
-}
-
-impl Maps {
-    /// Remove mappings that has no external references
-    pub fn cleanup(&mut self) -> usize {
-        self.maps.retain(|_k, Map { data, id, .. }| {
-            let retain = Self::has_references(data);
-            if !retain {
-                self.lru
-                    .remove(*id)
-                    .expect("Mapping was in maps but not in Lru");
-            }
-            retain
-        });
-        self.maps.len()
-    }
-
-    /// Try to unload the oldest mapping that has no external references
-    pub fn try_unload_one(&mut self) {
-        self.lru.pop_when(|id| Self::try_unload(&mut self.maps, id));
-    }
-
-    /// Try to unload the mapping, only if it has no external references
-    fn try_unload(maps: &mut HashMap<u64, Map>, id: u64) -> bool {
-        let map = maps.entry(id);
-        let Entry::Occupied(mut oc) = map else {
-            panic!("Can't run try_unload on map that does not exist")
-        };
-        if !Self::has_references(&mut oc.get_mut().data) {
-            oc.remove();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns whether Bytes has references other than one that is passed as an argument
-    fn has_references(data: &mut Bytes) -> bool {
-        // Bytes::downcast_any returns Some only when it's the only reference
-        data.downcast_any().is_none()
     }
 }
 
@@ -600,7 +518,7 @@ mod tests {
         let file = dir.path().join("wal");
         let layout = WalLayout {
             frag_size: 1024,
-            max_maps: MAP_MUTEXES * 2,
+            max_maps: 2,
         };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
@@ -646,12 +564,6 @@ mod tests {
             let p3 = assert_bytes(&large, wal_iterator.next());
             let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            // wal_iterator holds the reference to mapping, so can't clean all of them
-            assert_eq!(wal.cleanup(), 1);
-            drop(wal_iterator);
-            // after wal_iterator is dropped, cleanup should free all memory
-            assert_eq!(wal.cleanup(), 0);
-            drop(wal);
             let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
             assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
@@ -671,7 +583,7 @@ mod tests {
     fn test_atomic_wal_position() {
         let layout = WalLayout {
             frag_size: 512,
-            max_maps: MAP_MUTEXES * 2,
+            max_maps: 2,
         };
         let position = AtomicWalPosition {
             layout,
