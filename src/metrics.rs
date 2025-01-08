@@ -58,9 +58,9 @@ impl Metrics {
 
     pub fn new_in(registry: &Registry) -> Arc<Self> {
         let index_size_buckets = exponential_buckets(100., 2., 20).unwrap();
-        let lookup_buckets = exponential_buckets(10., 2., 12).unwrap();
-        let db_op_buckets = exponential_buckets(10., 2., 16).unwrap();
-        let lock_buckets = exponential_buckets(1., 2., 12).unwrap();
+        let lookup_buckets = exponential_buckets(5., 1.5, 12).unwrap();
+        let db_op_buckets = exponential_buckets(5., 1.5, 16).unwrap();
+        let lock_buckets = exponential_buckets(1., 1.5, 12).unwrap();
         let this = Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
             max_index_size: AtomicUsize::new(0),
