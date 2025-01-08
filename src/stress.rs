@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::Db;
+use crate::key_shape::{KeyShape, KeySpace};
 use crate::metrics::Metrics;
 use bytes::BufMut;
 use clap::Parser;
@@ -31,7 +32,8 @@ pub fn main() {
     let dir = tempdir::TempDir::new("stress").unwrap();
     let config = Arc::new(Config::default());
     let metrics = Metrics::new();
-    let db = Db::open(dir.path(), config, metrics.clone()).unwrap();
+    let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
+    let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let db = Arc::new(db);
     let stress = Stress { db, args };
     let elapsed = stress.measure(StressThread::run_writes);
@@ -70,6 +72,7 @@ impl Stress {
         let start_w = start_lock.write();
         for index in 0..self.args.threads {
             let thread = StressThread {
+                ks,
                 db: self.db.clone(),
                 start_lock: start_lock.clone(),
                 args: self.args.clone(),
@@ -114,6 +117,7 @@ fn byte_div(n: usize) -> String {
 
 struct StressThread {
     db: Arc<Db>,
+    ks: KeySpace,
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
     index: u64,
@@ -124,7 +128,7 @@ impl StressThread {
         let _ = self.start_lock.read();
         for pos in 0..self.args.writes {
             let (key, value) = self.key_value(pos);
-            self.db.insert(key, value).unwrap();
+            self.db.insert(self.ks, key, value).unwrap();
         }
     }
 
@@ -136,7 +140,7 @@ impl StressThread {
             let (key, value) = self.key_value(pos);
             let found_value = self
                 .db
-                .get(&key)
+                .get(self.ks, &key)
                 .unwrap()
                 .expect("Expected value not found");
             assert_eq!(
