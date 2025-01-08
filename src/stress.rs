@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 struct StressArgs {
     #[arg(long, short = 't', help = "Number of write threads")]
     threads: usize,
-    #[arg(long, short = 'b', help = "Write block size")]
+    #[arg(long, short = 'b', help = "Length of the value")]
     write_size: usize,
     #[arg(long, short = 'k', help = "Length of the key")]
     key_len: usize,
