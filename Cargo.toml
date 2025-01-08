@@ -16,6 +16,7 @@ clap = { version = "4.5.16", features = ["derive"], optional = true }
 rand = { version = "0.8.5" , optional = true }
 tempdir = { version = "0.3.7" , optional = true}
 prometheus = "0.13.3"
+tokio = { version = "1.42.0", features = ["full"] }
 
 [dev-dependencies]
 tempdir = "0.3.7"

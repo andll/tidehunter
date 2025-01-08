@@ -16,7 +16,8 @@ impl<V> ShardedMutex<V> {
             return lock;
         }
         let now = Instant::now();
-        let lock = mutex.lock();
+        // todo move tokio dep under a feature
+        let lock = tokio::task::block_in_place(|| mutex.lock());
         metric.observe(now.elapsed().as_micros() as f64);
         lock
     }

@@ -186,10 +186,12 @@ impl LargeTable {
             }
             LargeTableEntryState::Unloaded(position) => position,
         };
-
+        // todo move tokio dep under a feature
         let now = Instant::now();
         let index_reader = loader.index_reader(index_position)?;
-        let result = IndexTable::lookup_unloaded(ks, &index_reader, k);
+        // todo - consider only doing block_in_place for the syscall random reader
+        let result =
+            tokio::task::block_in_place(|| IndexTable::lookup_unloaded(ks, &index_reader, k));
         self.metrics
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), entry.ks.name()])
