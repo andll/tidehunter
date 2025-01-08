@@ -4,6 +4,7 @@ use prometheus::{
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::time::Instant;
 
 pub struct Metrics {
     pub replayed_wal_records: IntCounter,
@@ -23,6 +24,7 @@ pub struct Metrics {
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
+    pub db_op_mcs: HistogramVec,
 }
 
 #[macro_export]
@@ -57,6 +59,7 @@ impl Metrics {
     pub fn new_in(registry: &Registry) -> Arc<Self> {
         let index_size_buckets = exponential_buckets(100., 2., 20).unwrap();
         let lookup_buckets = exponential_buckets(10., 2., 12).unwrap();
+        let db_op_buckets = exponential_buckets(10., 2., 16).unwrap();
         let lock_buckets = exponential_buckets(1., 2., 12).unwrap();
         let this = Metrics {
             replayed_wal_records: counter!("replayed_wal_records", registry),
@@ -85,8 +88,34 @@ impl Metrics {
                 registry
             ),
             wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
+            db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)
+    }
+}
+
+pub trait TimerExt {
+    fn mcs_timer(self) -> impl Drop;
+}
+
+pub struct McsTimer {
+    histogram: Histogram,
+    start: Instant,
+}
+
+impl TimerExt for Histogram {
+    fn mcs_timer(self) -> impl Drop {
+        McsTimer {
+            histogram: self,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for McsTimer {
+    fn drop(&mut self) {
+        self.histogram
+            .observe(self.start.elapsed().as_micros() as f64)
     }
 }

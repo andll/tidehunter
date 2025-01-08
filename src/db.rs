@@ -9,7 +9,7 @@ use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{
     LargeTable, LargeTableContainer, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
 };
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
@@ -158,9 +158,14 @@ impl Db {
     }
 
     pub fn insert(&self, ks: KeySpace, k: impl Into<Bytes>, v: impl Into<Bytes>) -> DbResult<()> {
+        let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["insert", ks.name()])
+            .mcs_timer();
         let k = k.into();
         let v = v.into();
-        let ks = self.key_shape.ks(ks);
         ks.check_key(&k);
         let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v));
         self.metrics
@@ -174,22 +179,30 @@ impl Db {
     }
 
     pub fn remove(&self, ks: KeySpace, k: impl Into<Bytes>) -> DbResult<()> {
+        let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["remove", ks.name()])
+            .mcs_timer();
         let k = k.into();
-        self.key_shape.ks(ks).check_key(&k);
-        let w = PreparedWalWrite::new(&WalEntry::Remove(ks, k.clone()));
+        ks.check_key(&k);
+        let w = PreparedWalWrite::new(&WalEntry::Remove(ks.id(), k.clone()));
         self.metrics
             .wal_written_bytes_type
             .with_label_values(&["tombstone"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
-        Ok(self
-            .large_table
-            .read()
-            .remove(self.key_shape.ks(ks), k, position, self)?)
+        Ok(self.large_table.read().remove(ks, k, position, self)?)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["get", ks.name()])
+            .mcs_timer();
         let Some(position) = self.large_table.read().get(ks, k, self)? else {
             return Ok(None);
         };
@@ -199,6 +212,11 @@ impl Db {
 
     pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["exists", ks.name()])
+            .mcs_timer();
         Ok(self.large_table.read().get(ks, k, self)?.is_some())
     }
 
@@ -267,8 +285,15 @@ impl Db {
         from_included: &Bytes,
         to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
-        let cell = self.key_shape.range_cell(ks, from_included, to_included);
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["last_in_range", ks.name()])
+            .mcs_timer();
+        let cell = self
+            .key_shape
+            .range_cell(ks.id(), from_included, to_included);
         let Some((key, position)) =
             self.large_table
                 .read()
@@ -323,6 +348,11 @@ impl Db {
         )>,
     > {
         let ks = self.key_shape.ks(ks);
+        let _timer = self
+            .metrics
+            .db_op_mcs
+            .with_label_values(&["next_entry", ks.name()])
+            .mcs_timer();
         let Some((next_cell, next_key, key, wal_position)) =
             self.large_table
                 .read()
