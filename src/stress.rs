@@ -24,13 +24,23 @@ struct StressArgs {
     writes: usize,
     #[arg(long, short = 'r', help = "Blocks to read per thread")]
     reads: usize,
+    #[arg(long, short = 'p', help = "Path for storage temp dir")]
+    path: Option<String>,
 }
 
 pub fn main() {
     let args = StressArgs::parse();
     let args = Arc::new(args);
-    let dir = tempdir::TempDir::new("stress").unwrap();
-    let config = Arc::new(Config::default());
+    let dir = if let Some(path) = &args.path {
+        tempdir::TempDir::new_in(path, "stress").unwrap()
+    } else {
+        tempdir::TempDir::new("stress").unwrap()
+    };
+    println!("Path to storage: {}", dir.path().display());
+    let mut config = Config::default();
+    config.max_loaded_entries = 32;
+    config.max_dirty_keys = 1024;
+    let config = Arc::new(config);
     let metrics = Metrics::new();
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
