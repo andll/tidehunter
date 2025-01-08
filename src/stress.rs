@@ -9,8 +9,8 @@ use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 #[derive(Parser, Debug)]
 struct StressArgs {
@@ -35,7 +35,8 @@ pub fn main() {
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let db = Arc::new(db);
-    let stress = Stress { db, args };
+    db.start_periodic_snapshot();
+    let stress = Stress { db, ks, args };
     let elapsed = stress.measure(StressThread::run_writes);
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
@@ -45,6 +46,9 @@ pub fn main() {
         dec_div(written / msecs * 1000),
         byte_div(written_bytes / msecs * 1000)
     );
+    let wal = Db::wal_path(dir.path());
+    let wal_len = fs::metadata(wal).unwrap().len();
+    println!("Wal size {:.1} Gb", wal_len as f64 / 1024. / 1024. / 1024.);
     let elapsed = stress.measure(StressThread::run_reads);
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
@@ -62,6 +66,7 @@ pub fn main() {
 
 struct Stress {
     db: Arc<Db>,
+    ks: KeySpace,
     args: Arc<StressArgs>,
 }
 
@@ -72,7 +77,7 @@ impl Stress {
         let start_w = start_lock.write();
         for index in 0..self.args.threads {
             let thread = StressThread {
-                ks,
+                ks: self.ks,
                 db: self.db.clone(),
                 start_lock: start_lock.clone(),
                 args: self.args.clone(),

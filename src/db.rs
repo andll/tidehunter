@@ -19,7 +19,7 @@ use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io, thread};
@@ -59,7 +59,7 @@ impl Db {
             config.clone(),
             metrics.clone(),
         );
-        let wal = Wal::open(&path.join("wal"), config.wal_layout(), metrics.clone())?;
+        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let large_table = RwLock::new(large_table);
@@ -73,6 +73,10 @@ impl Db {
             metrics,
             key_shape,
         })
+    }
+
+    pub(crate) fn wal_path(path: &Path) -> PathBuf {
+        path.join("wal")
     }
 
     pub fn start_periodic_snapshot(self: &Arc<Self>) {
