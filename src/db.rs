@@ -112,7 +112,6 @@ impl Db {
     ) -> Result<(ControlRegionStore, ControlRegion), DbError> {
         let file_len = cr.metadata()?.len() as usize;
         let cr_len = key_shape.cr_len();
-        println!("cr_len {cr_len}");
         let mut cr_map = unsafe { MmapOptions::new().len(cr_len * 2).map_mut(cr)? };
         let (last_written_left, control_region) = if file_len != cr_len * 2 {
             cr.set_len((cr_len * 2) as u64)?;
