@@ -405,14 +405,16 @@ impl LargeTable {
             for mutex in ks_table.mutexes() {
                 let lock = mutex.lock();
                 for entry in lock.data.iter() {
-                    *states.entry(entry.state.name()).or_default() += 1;
+                    *states
+                        .entry((entry.ks.name().to_string(), entry.state.name()))
+                        .or_default() += 1;
                 }
             }
         }
-        for (label, value) in states {
+        for ((ks, state), value) in states {
             self.metrics
                 .entry_state
-                .with_label_values(&[label])
+                .with_label_values(&[&ks, state])
                 .set(value);
         }
     }

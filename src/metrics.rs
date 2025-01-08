@@ -69,7 +69,7 @@ impl Metrics {
             wal_written_bytes: gauge!("wal_written_bytes", registry),
             wal_written_bytes_type: counter_vec!("wal_written_bytes_type", &["type"], registry),
             unload: counter_vec!("unload", &["kind"], registry),
-            entry_state: gauge_vec!("entry_state", &["state"], registry),
+            entry_state: gauge_vec!("entry_state", &["ks", "state"], registry),
             compacted_keys: counter_vec!("compacted_keys", &["ks"], registry),
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
