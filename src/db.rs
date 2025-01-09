@@ -316,6 +316,10 @@ impl Db {
         self.large_table.read().is_empty()
     }
 
+    pub fn ks_name(&self, ks: KeySpace) -> &str {
+        self.key_shape.ks(ks).name()
+    }
+
     /// Returns the next entry in the database.
     /// Iterator must specify the cell to inspect and the (Optional) next key.
     ///
