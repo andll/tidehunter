@@ -25,6 +25,7 @@ pub struct Metrics {
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
     pub db_op_mcs: HistogramVec,
+    pub map_time_mcs: Histogram,
 }
 
 #[macro_export]
@@ -89,6 +90,7 @@ impl Metrics {
             ),
             wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
+            map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)

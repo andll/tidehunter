@@ -1,6 +1,6 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::lookup::{FileRange, RandomRead};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, TimerExt};
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::MmapMut;
 use minibytes::Bytes;
@@ -284,6 +284,7 @@ impl Wal {
 
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
         let mut maps = self.maps.write();
+        let _timer = self.metrics.map_time_mcs.clone().mcs_timer();
         let map = match maps.entry(id) {
             Entry::Vacant(va) => {
                 let range = self.layout.map_range(id);
