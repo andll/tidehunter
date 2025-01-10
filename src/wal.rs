@@ -14,14 +14,15 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
-use std::{io, mem};
+use std::{io, mem, thread};
 
-#[derive(Clone)]
 pub struct WalWriter {
     wal: Arc<Wal>,
     map: Arc<Mutex<Map>>,
     position: AtomicWalPosition,
+    mapper: WalMapper,
 }
 
 pub struct Wal {
@@ -29,6 +30,18 @@ pub struct Wal {
     layout: WalLayout,
     maps: RwLock<BTreeMap<u64, Map>>,
     metrics: Arc<Metrics>,
+}
+
+struct WalMapper {
+    jh: Option<JoinHandle<()>>,
+    receiver: Option<crossbeam_channel::Receiver<Map>>,
+}
+
+struct WalMapperThread {
+    sender: crossbeam_channel::Sender<Map>,
+    last_map: u64,
+    file: File,
+    layout: WalLayout,
 }
 
 pub struct WalIterator {
@@ -69,7 +82,6 @@ impl WalWriter {
                 let buf = map.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
-            self.wal.extend_to_map(map_id)?;
             let mmap_mut = map
                 .data
                 .downcast_ref::<MmapMut>()
@@ -77,7 +89,7 @@ impl WalWriter {
             // Asynchronously flush the filled mem map
             // todo evaluate to make sure this does not hurt performance in real app
             mmap_mut.flush_async()?;
-            *map = self.wal.map(map_id, true)?;
+            *map = self.wal.recv_map(&self.mapper, map_id);
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
             // assert_eq!(pos, align(prev_block_end));
@@ -195,6 +207,7 @@ impl Wal {
         Arc::new(reader)
     }
 
+    // todo remove
     pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         assert_ne!(
             pos,
@@ -282,11 +295,26 @@ impl Wal {
         maps.get(&id).cloned()
     }
 
+    fn recv_map(&self, wal_mapper: &WalMapper, expect_id: u64) -> Map {
+        let map = wal_mapper.next_map();
+        assert_eq!(
+            map.id, expect_id,
+            "Id from wal mapper does not match expected map id"
+        );
+        let mut maps = self.maps.write();
+        let prev = maps.insert(map.id, map.clone());
+        if prev.is_some() {
+            panic!("Re-inserting mapping into wal is not allowed");
+        }
+        map
+    }
+
     fn map(&self, id: u64, writeable: bool) -> io::Result<Map> {
         let mut maps = self.maps.write();
         let _timer = self.metrics.map_time_mcs.clone().mcs_timer();
         let map = match maps.entry(id) {
             Entry::Vacant(va) => {
+                // todo - make sure WalMapper is not active when this code is called
                 let range = self.layout.map_range(id);
                 let data = unsafe {
                     let mut options = memmap2::MmapOptions::new();
@@ -325,11 +353,11 @@ impl Wal {
     }
 
     /// Resize file to fit the specified map id
-    fn extend_to_map(&self, id: u64) -> io::Result<()> {
-        let range = self.layout.map_range(id);
-        let len = self.file.metadata()?.len();
+    fn extend_to_map(layout: &WalLayout, file: &File, id: u64) -> io::Result<()> {
+        let range = layout.map_range(id);
+        let len = file.metadata()?.len();
         if len < range.end {
-            self.file.set_len(range.end)?;
+            file.set_len(range.end)?;
         }
         Ok(())
     }
@@ -343,7 +371,7 @@ impl Wal {
             (true, position.0)
         };
         let (map_id, _) = self.layout.locate(position);
-        self.extend_to_map(map_id)?;
+        Self::extend_to_map(&self.layout, &self.file, map_id)?;
         let map = self.map(map_id, true)?;
         let mut iterator = WalIterator {
             wal: self.clone(),
@@ -354,6 +382,74 @@ impl Wal {
             iterator.next()?;
         }
         Ok(iterator)
+    }
+}
+
+impl WalMapper {
+    pub fn start(last_map: u64, file: File, layout: WalLayout) -> Self {
+        let (sender, receiver) = crossbeam_channel::bounded(2);
+        let this = WalMapperThread {
+            last_map,
+            file,
+            layout,
+            sender,
+        };
+        let jh = thread::Builder::new()
+            .name("wal-mapper".to_string())
+            .spawn(move || this.run())
+            .expect("failed to start wal-mapper thread");
+        let receiver = Some(receiver);
+        let jh = Some(jh);
+        Self { jh, receiver }
+    }
+
+    pub fn next_map(&self) -> Map {
+        self.receiver
+            .as_ref()
+            .expect("next_map is called after drop")
+            .recv()
+            .expect("Map thread stopped unexpectedly")
+    }
+}
+
+impl Drop for WalMapper {
+    fn drop(&mut self) {
+        self.receiver.take();
+        self.jh
+            .take()
+            .unwrap()
+            .join()
+            .expect("wal-mapper thread panic")
+    }
+}
+
+impl WalMapperThread {
+    pub fn run(self) {
+        loop {
+            let id = self.last_map + 1;
+            Wal::extend_to_map(&self.layout, &self.file, id).expect("Failed to extend wal file");
+            let range = self.layout.map_range(id);
+            let data = unsafe {
+                let mut options = memmap2::MmapOptions::new();
+                options
+                    .offset(range.start)
+                    .len(self.layout.frag_size as usize);
+                options
+                    .populate()
+                    .map_mut(&self.file)
+                    .expect("Failed to mmap on wal file")
+                    .into()
+            };
+            let map = Map {
+                id,
+                writeable: true,
+                data,
+            };
+            // todo ideally figure out a way to not create a map when sender closes
+            if self.sender.send(map).is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -377,7 +473,7 @@ impl WalIterator {
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(self.position);
         if self.map.id != map_id {
-            self.wal.extend_to_map(map_id)?;
+            Wal::extend_to_map(&self.wal.layout, &self.wal.file, map_id)?;
             self.map = self.wal.map(map_id, true)?;
         }
         Ok(CrcFrame::read_from_bytes(&self.map.data, offset as usize)?)
@@ -388,10 +484,16 @@ impl WalIterator {
             position: Arc::new(AtomicU64::new(self.position)),
             layout: self.wal.layout.clone(),
         };
+        let mapper = WalMapper::start(
+            self.map.id,
+            self.wal.file.try_clone().unwrap(),
+            self.wal.layout.clone(),
+        );
         WalWriter {
             wal: self.wal,
             map: Arc::new(Mutex::new(self.map)),
             position,
+            mapper,
         }
     }
 
