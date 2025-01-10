@@ -625,6 +625,7 @@ impl From<io::Error> for WalError {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use std::collections::HashSet;
 
     #[test]
     fn test_wal() {
@@ -726,6 +727,60 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_wal_write() {
+        let dir = tempdir::TempDir::new("test-wal").unwrap();
+        let file = dir.path().join("wal");
+        let layout = WalLayout {
+            frag_size: 512,
+            max_maps: 2,
+        };
+        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+        let wal_writer = wal
+            .wal_iterator(WalPosition::INVALID)
+            .unwrap()
+            .into_writer();
+        let wal_writer = Arc::new(wal_writer);
+        let threads = 8u64;
+        let writes_per_thread = 256u64;
+        let mut all_writes = HashSet::new();
+        let mut jhs = Vec::with_capacity(threads as usize);
+        for thread in 0..threads {
+            all_writes.extend(
+                (0..writes_per_thread)
+                    .into_iter()
+                    .map(|w| (thread << 16) + w),
+            );
+            let wal_writer = wal_writer.clone();
+            let jh = thread::spawn(move || {
+                for write in 0..writes_per_thread {
+                    let value = (thread << 16) + write;
+                    let write = PreparedWalWrite::new(&value);
+                    wal_writer.write(&write).unwrap();
+                }
+            });
+            jhs.push(jh);
+        }
+        for jh in jhs {
+            jh.join().unwrap();
+        }
+        drop(wal_writer);
+        drop(wal);
+        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
+        let mut iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
+        while let Ok((_, value)) = iterator.next() {
+            let value = u64::from_be_bytes(value[..].try_into().unwrap());
+            if !all_writes.remove(&value) {
+                panic!("Value {value} was in wal but was not written")
+            }
+        }
+        assert!(
+            all_writes.is_empty(),
+            "Some writes not found in wal({})",
+            all_writes.len()
+        )
+    }
+
+    #[test]
     fn test_position() {
         let mut buf = BytesMut::new();
         WalPosition::TEST.write_to_buf(&mut buf);
@@ -740,5 +795,15 @@ mod tests {
         let v = v.expect("Expected value, got nothing");
         assert_eq!(e, v.1.as_ref());
         v.0
+    }
+
+    impl IntoBytesFixed for u64 {
+        fn len(&self) -> usize {
+            8
+        }
+
+        fn write_into_bytes(&self, buf: &mut BytesMut) {
+            buf.put_u64(*self)
+        }
     }
 }
