@@ -12,7 +12,6 @@ use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -20,8 +19,7 @@ use std::{io, mem, thread};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
-    map: Arc<Mutex<Map>>,
-    position: AtomicWalPosition,
+    position_and_map: Mutex<(IncrementalWalPosition, Map)>,
     mapper: WalMapper,
 }
 
@@ -69,34 +67,34 @@ impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
-        let (pos, prev_block_end) = self.position.allocate_position(len_aligned);
+        let mut position_map = self.position_and_map.lock();
+        let (pos, prev_block_end) = position_map.0.allocate_position(len_aligned);
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(pos);
-        let mut map = self.map.lock();
         // todo - decide whether map is covered by mutex or we want concurrent writes
-        if map.id != map_id {
+        if position_map.1.id != map_id {
             if pos != prev_block_end {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
-                assert_eq!(prev_map, map.id);
+                assert_eq!(prev_map, position_map.1.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = map.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
+                let buf = position_map.1.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
-            let mmap_mut = map
+            let mmap_mut = position_map.1
                 .data
                 .downcast_ref::<MmapMut>()
                 .expect("Can't downcast writable map to MmapMut");
             // Asynchronously flush the filled mem map
             // todo evaluate to make sure this does not hurt performance in real app
             mmap_mut.flush_async()?;
-            *map = self.wal.recv_map(&self.mapper, map_id);
+            position_map.1 = self.wal.recv_map(&self.mapper, map_id);
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
             // assert_eq!(pos, align(prev_block_end));
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
-        let buf = map.write_buf_at(offset as usize, len as usize);
+        let buf = position_map.1.write_buf_at(offset as usize, len as usize);
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
@@ -106,32 +104,26 @@ impl WalWriter {
     /// Current un-initialized position,
     /// not to be used as WalPosition, only as a metric to see how many bytes were written
     pub fn position(&self) -> u64 {
-        self.position.position.load(Ordering::Relaxed)
+        self.position_and_map.lock().0.position
     }
 }
 
 #[derive(Clone)]
-struct AtomicWalPosition {
-    position: Arc<AtomicU64>,
+struct IncrementalWalPosition {
+    position: u64,
     layout: WalLayout,
 }
 
-impl AtomicWalPosition {
+impl IncrementalWalPosition {
     /// Allocate new position according to layout
     ///
     /// Returns new position and then end of previous block
-    pub fn allocate_position(&self, len_aligned: u64) -> (u64, u64) {
+    pub fn allocate_position(&mut self, len_aligned: u64) -> (u64, u64) {
         assert!(len_aligned > 0);
-        let mut position: Option<(u64, u64)> = None;
-        // todo aggressive multi-thread test for this
-        self.position
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev_pos| {
-                let pos = self.layout.next_position(prev_pos, len_aligned);
-                position = Some((pos, prev_pos));
-                Some(pos + len_aligned)
-            })
-            .ok();
-        position.unwrap()
+        let position = self.layout.next_position(self.position, len_aligned);
+        let result = (position, self.position);
+        self.position = position + len_aligned;
+        result
     }
 }
 
@@ -208,6 +200,7 @@ impl Wal {
     }
 
     // todo remove
+    #[cfg(test)]
     pub fn read(&self, pos: WalPosition) -> Result<Bytes, WalError> {
         assert_ne!(
             pos,
@@ -483,8 +476,8 @@ impl WalIterator {
     }
 
     pub fn into_writer(self) -> WalWriter {
-        let position = AtomicWalPosition {
-            position: Arc::new(AtomicU64::new(self.position)),
+        let position = IncrementalWalPosition {
+            position: self.position,
             layout: self.wal.layout.clone(),
         };
         let mapper = WalMapper::start(
@@ -492,10 +485,12 @@ impl WalIterator {
             self.wal.file.try_clone().unwrap(),
             self.wal.layout.clone(),
         );
+        assert_eq!(self.wal.layout.locate(position.position).0, self.map.id);
+        let position_and_map = (position, self.map);
+        let position_and_map = Mutex::new(position_and_map);
         WalWriter {
             wal: self.wal,
-            map: Arc::new(Mutex::new(self.map)),
-            position,
+            position_and_map,
             mapper,
         }
     }
@@ -695,14 +690,14 @@ mod tests {
     }
 
     #[test]
-    fn test_atomic_wal_position() {
+    fn test_incremental_wal_position() {
         let layout = WalLayout {
             frag_size: 512,
             max_maps: 2,
         };
-        let position = AtomicWalPosition {
+        let mut position = IncrementalWalPosition {
             layout,
-            position: Arc::new(AtomicU64::new(0)),
+            position: 0,
         };
         assert_eq!((0, 0), position.allocate_position(16));
         assert_eq!((16, 16), position.allocate_position(8));
