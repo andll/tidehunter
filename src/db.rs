@@ -759,6 +759,44 @@ mod test {
     }
 
     #[test]
+    fn test_multi_thread_write() {
+        let dir = tempdir::TempDir::new("test-batch").unwrap();
+        let config = Config::small();
+        let config = Arc::new(config);
+        let (key_shape, ks) = KeyShape::new_single(8, 12, 12);
+        let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
+        let db = Arc::new(db);
+        let threads = 8u64;
+        let mut jhs = Vec::with_capacity(threads as usize);
+        let iterations = 256u64;
+        for t in 0..threads {
+            let db = db.clone();
+            let jh = thread::spawn(move || {
+                for i in 0..iterations {
+                    let key = (t << 16) + i;
+                    let value = (i << 16) + t;
+                    db.insert(ks, key.to_be_bytes().to_vec(), value.to_be_bytes().to_vec())
+                        .unwrap();
+                }
+            });
+            jhs.push(jh);
+        }
+        for jh in jhs {
+            jh.join().unwrap();
+        }
+        for t in 0..threads {
+            for i in 0..iterations {
+                let key = (t << 16) + i;
+                let expected_value = (i << 16) + t;
+                let expected_value = expected_value.to_be_bytes();
+                let value = db.get(ks, &key.to_be_bytes()).unwrap();
+                let value = value.unwrap();
+                assert_eq!(&expected_value, value.as_ref());
+            }
+        }
+    }
+
+    #[test]
     fn test_batch() {
         let dir = tempdir::TempDir::new("test-batch").unwrap();
         let config = Arc::new(Config::small());
