@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 use std::{io, mem, thread};
@@ -34,11 +34,11 @@ pub struct Wal {
 
 struct WalMapper {
     jh: Option<JoinHandle<()>>,
-    receiver: Option<crossbeam_channel::Receiver<Map>>,
+    receiver: Option<Mutex<mpsc::Receiver<Map>>>,
 }
 
 struct WalMapperThread {
-    sender: crossbeam_channel::Sender<Map>,
+    sender: mpsc::SyncSender<Map>,
     last_map: u64,
     file: File,
     layout: WalLayout,
@@ -387,7 +387,7 @@ impl Wal {
 
 impl WalMapper {
     pub fn start(last_map: u64, file: File, layout: WalLayout) -> Self {
-        let (sender, receiver) = crossbeam_channel::bounded(2);
+        let (sender, receiver) = mpsc::sync_channel(2);
         let this = WalMapperThread {
             last_map,
             file,
@@ -398,6 +398,7 @@ impl WalMapper {
             .name("wal-mapper".to_string())
             .spawn(move || this.run())
             .expect("failed to start wal-mapper thread");
+        let receiver = Mutex::new(receiver);
         let receiver = Some(receiver);
         let jh = Some(jh);
         Self { jh, receiver }
@@ -407,6 +408,7 @@ impl WalMapper {
         self.receiver
             .as_ref()
             .expect("next_map is called after drop")
+            .lock()
             .recv()
             .expect("Map thread stopped unexpectedly")
     }
