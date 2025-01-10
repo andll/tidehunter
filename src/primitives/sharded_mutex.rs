@@ -32,12 +32,3 @@ impl<V> AsRef<[Mutex<V>]> for ShardedMutex<V> {
         &self.0
     }
 }
-
-impl<V: Default> ShardedMutex<V> {
-    pub fn new_default_array<const N: usize>() -> Self
-    where
-        [Mutex<V>; N]: Default,
-    {
-        Self(Box::new(<[Mutex<V>; N]>::default()))
-    }
-}
