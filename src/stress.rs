@@ -8,8 +8,9 @@ use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -25,6 +26,14 @@ struct StressArgs {
     writes: usize,
     #[arg(long, short = 'r', help = "Blocks to read per thread")]
     reads: usize,
+    #[arg(
+        long,
+        short = 'u',
+        help = "Background writes per second during read test"
+    )]
+    background_writes: usize,
+    #[arg(long, short = 'n', help = "Disable periodic snapshot", default_value = "false")]
+    no_snapshot: bool,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,
 }
@@ -46,7 +55,12 @@ pub fn main() {
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let db = Arc::new(db);
-    db.start_periodic_snapshot();
+    if !args.no_snapshot {
+        println!("Start periodic snapshot");
+        db.start_periodic_snapshot();
+    } else {
+        println!("Periodic snapshot disabled");
+    }
     let stress = Stress { db, ks, args };
     println!("Starting write test");
     let elapsed = stress.measure(StressThread::run_writes);
@@ -62,7 +76,13 @@ pub fn main() {
     let wal_len = fs::metadata(wal).unwrap().len();
     println!("Wal size {:.1} Gb", wal_len as f64 / 1024. / 1024. / 1024.);
     println!("Starting read test");
+    let manual_stop = if stress.args.background_writes > 0 {
+        stress.background(StressThread::run_background_writes)
+    } else {
+        Default::default()
+    };
     let elapsed = stress.measure(StressThread::run_reads);
+    manual_stop.store(true, Ordering::Relaxed);
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
@@ -84,28 +104,17 @@ struct Stress {
 }
 
 impl Stress {
-    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(&self, f: F) -> Duration {
-        let mut threads = Vec::with_capacity(self.args.threads);
-        let start_lock = Arc::new(RwLock::new(()));
-        let start_w = start_lock.write();
-        let read_latency = AtomicHistogram::new(12, 20).unwrap();
-        let latency = Arc::new(read_latency);
-        for index in 0..self.args.threads {
-            let thread = StressThread {
-                ks: self.ks,
-                db: self.db.clone(),
-                start_lock: start_lock.clone(),
-                args: self.args.clone(),
-                index: index as u64,
+    pub fn background<F: FnOnce(StressThread) + Clone + Send + 'static>(
+        &self,
+        f: F,
+    ) -> Arc<AtomicBool> {
+        let (_, manual_stop, _) = self.start_threads(f);
+        manual_stop
+    }
 
-                latency: latency.clone(),
-            };
-            let f = f.clone();
-            let thread = thread::spawn(move || f(thread));
-            threads.push(thread);
-        }
+    pub fn measure<F: FnOnce(StressThread) + Clone + Send + 'static>(&self, f: F) -> Duration {
+        let (threads, _, latency) = self.start_threads(f);
         let start = Instant::now();
-        drop(start_w);
         for t in threads {
             t.join().unwrap();
         }
@@ -118,6 +127,35 @@ impl Stress {
         println!("Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
         p(0), p(1), p(2), p(3), p(4), p(5));
         start.elapsed()
+    }
+
+    fn start_threads<F: FnOnce(StressThread) + Clone + Send + 'static>(
+        &self,
+        f: F,
+    ) -> (Vec<JoinHandle<()>>, Arc<AtomicBool>, Arc<AtomicHistogram>) {
+        let mut threads = Vec::with_capacity(self.args.threads);
+        let start_lock = Arc::new(RwLock::new(()));
+        let start_w = start_lock.write();
+        let manual_stop = Arc::new(AtomicBool::new(false));
+        let latency = AtomicHistogram::new(12, 20).unwrap();
+        let latency = Arc::new(latency);
+        for index in 0..self.args.threads {
+            let thread = StressThread {
+                ks: self.ks,
+                db: self.db.clone(),
+                start_lock: start_lock.clone(),
+                args: self.args.clone(),
+                index: index as u64,
+                manual_stop: manual_stop.clone(),
+
+                latency: latency.clone(),
+            };
+            let f = f.clone();
+            let thread = thread::spawn(move || f(thread));
+            threads.push(thread);
+        }
+        drop(start_w);
+        (threads, manual_stop, latency)
     }
 }
 
@@ -151,6 +189,7 @@ struct StressThread {
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
     index: u64,
+    manual_stop: Arc<AtomicBool>,
 
     latency: Arc<AtomicHistogram>,
 }
@@ -165,6 +204,24 @@ impl StressThread {
             self.latency
                 .increment(timer.elapsed().as_micros() as u64)
                 .unwrap();
+        }
+    }
+
+    pub fn run_background_writes(self) {
+        let writes_per_thread = self.args.background_writes / self.args.threads;
+        let delay = Duration::from_micros(1_000_000 / writes_per_thread as u64);
+        let mut deadline = Instant::now();
+        let mut pos = usize::MAX;
+        while !self.manual_stop.load(Ordering::Relaxed) {
+            deadline = deadline + delay;
+            pos -= 1;
+            let (key, value) = self.key_value(pos);
+            self.db.insert(self.ks, key, value).unwrap();
+            thread::sleep(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default(),
+            )
         }
     }
 
