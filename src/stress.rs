@@ -4,6 +4,7 @@ use crate::key_shape::{KeyShape, KeySpace};
 use crate::metrics::Metrics;
 use bytes::BufMut;
 use clap::Parser;
+use histogram::AtomicHistogram;
 use parking_lot::RwLock;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
@@ -47,6 +48,7 @@ pub fn main() {
     let db = Arc::new(db);
     db.start_periodic_snapshot();
     let stress = Stress { db, ks, args };
+    println!("Starting write test");
     let elapsed = stress.measure(StressThread::run_writes);
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
@@ -59,6 +61,7 @@ pub fn main() {
     let wal = Db::wal_path(dir.path());
     let wal_len = fs::metadata(wal).unwrap().len();
     println!("Wal size {:.1} Gb", wal_len as f64 / 1024. / 1024. / 1024.);
+    println!("Starting read test");
     let elapsed = stress.measure(StressThread::run_reads);
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
@@ -85,6 +88,8 @@ impl Stress {
         let mut threads = Vec::with_capacity(self.args.threads);
         let start_lock = Arc::new(RwLock::new(()));
         let start_w = start_lock.write();
+        let read_latency = AtomicHistogram::new(12, 20).unwrap();
+        let latency = Arc::new(read_latency);
         for index in 0..self.args.threads {
             let thread = StressThread {
                 ks: self.ks,
@@ -92,6 +97,8 @@ impl Stress {
                 start_lock: start_lock.clone(),
                 args: self.args.clone(),
                 index: index as u64,
+
+                latency: latency.clone(),
             };
             let f = f.clone();
             let thread = thread::spawn(move || f(thread));
@@ -102,6 +109,14 @@ impl Stress {
         for t in threads {
             t.join().unwrap();
         }
+        let latency = latency.drain();
+        let percentiles = latency
+            .percentiles(&[50., 90., 99., 99.9, 99.99, 99.999])
+            .unwrap()
+            .unwrap();
+        let p = move |i: usize| percentiles.get(i).unwrap().1.range();
+        println!("Latency(mcs): p50: {:?}, p90: {:?}, p99: {:?}, p99.9: {:?}, p99.99: {:?}, p99.999: {:?}",
+        p(0), p(1), p(2), p(3), p(4), p(5));
         start.elapsed()
     }
 }
@@ -136,6 +151,8 @@ struct StressThread {
     start_lock: Arc<RwLock<()>>,
     args: Arc<StressArgs>,
     index: u64,
+
+    latency: Arc<AtomicHistogram>,
 }
 
 impl StressThread {
@@ -143,7 +160,11 @@ impl StressThread {
         let _ = self.start_lock.read();
         for pos in 0..self.args.writes {
             let (key, value) = self.key_value(pos);
+            let timer = Instant::now();
             self.db.insert(self.ks, key, value).unwrap();
+            self.latency
+                .increment(timer.elapsed().as_micros() as u64)
+                .unwrap();
         }
     }
 
@@ -153,11 +174,15 @@ impl StressThread {
         for _ in 0..self.args.reads {
             let pos = pos_rng.gen_range(0..self.args.writes);
             let (key, value) = self.key_value(pos);
+            let timer = Instant::now();
             let found_value = self
                 .db
                 .get(self.ks, &key)
                 .unwrap()
                 .expect("Expected value not found");
+            self.latency
+                .increment(timer.elapsed().as_micros() as u64)
+                .unwrap();
             assert_eq!(
                 &value[..],
                 &found_value[..],
