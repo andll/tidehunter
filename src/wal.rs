@@ -77,10 +77,13 @@ impl WalWriter {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
                 assert_eq!(prev_map, position_map.1.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = position_map.1.write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
+                let buf = position_map
+                    .1
+                    .write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
-            let mmap_mut = position_map.1
+            let mmap_mut = position_map
+                .1
                 .data
                 .downcast_ref::<MmapMut>()
                 .expect("Can't downcast writable map to MmapMut");
