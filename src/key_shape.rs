@@ -35,6 +35,7 @@ pub(crate) struct KeySpaceDesc {
 pub struct KeySpaceConfig {
     key_offset: usize,
     compactor: Option<Arc<Compactor>>,
+    disable_unload: bool,
 }
 
 // todo - we want better compactor API that does not expose too much internal details
@@ -193,6 +194,10 @@ impl KeySpaceDesc {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
 
+    pub(crate) fn unloading_disabled(&self) -> bool {
+        self.config.disable_unload
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -211,11 +216,17 @@ impl KeySpaceConfig {
         Self {
             key_offset,
             compactor: None,
+            disable_unload: false,
         }
     }
 
     pub fn with_compactor(mut self, compactor: Compactor) -> Self {
         self.compactor = Some(Arc::new(compactor));
+        self
+    }
+
+    pub fn disable_unload(mut self) -> Self {
+        self.disable_unload = true;
         self
     }
 }

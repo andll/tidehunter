@@ -613,6 +613,9 @@ impl LargeTableEntry {
     }
 
     pub fn unload<L: Loader>(&mut self, loader: &L, config: &Config) -> Result<(), L::Error> {
+        if self.ks.unloading_disabled() {
+            return Ok(());
+        }
         match &self.state {
             LargeTableEntryState::Empty => {}
             LargeTableEntryState::Unloaded(_) => {}
