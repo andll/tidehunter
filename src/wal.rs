@@ -526,13 +526,6 @@ impl RandomRead for WalRandomRead<'_> {
             WalRandomRead::File(range) => range.len(),
         }
     }
-
-    fn prefetch_range(&mut self, _range: &Range<usize>) {
-        match self {
-            WalRandomRead::Mapped(_) => {}
-            WalRandomRead::File(_) => { /*todo*/ }
-        }
-    }
 }
 
 impl Map {

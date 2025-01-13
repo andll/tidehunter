@@ -32,7 +32,12 @@ struct StressArgs {
         help = "Background writes per second during read test"
     )]
     background_writes: usize,
-    #[arg(long, short = 'n', help = "Disable periodic snapshot", default_value = "false")]
+    #[arg(
+        long,
+        short = 'n',
+        help = "Disable periodic snapshot",
+        default_value = "false"
+    )]
     no_snapshot: bool,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,

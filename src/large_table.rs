@@ -7,7 +7,7 @@ use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::{WalPosition, WalRandomRead};
 use minibytes::Bytes;
-use parking_lot::{MappedMutexGuard, MutexGuard};
+use parking_lot::MutexGuard;
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::atomic::Ordering;
