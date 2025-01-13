@@ -223,30 +223,6 @@ impl LargeTable {
         }
     }
 
-    fn load_entry<'a, L: Loader>(
-        &self,
-        mut row: MutexGuard<'a, Row>,
-        offset: usize,
-        loader: &L,
-    ) -> Result<MappedMutexGuard<'a, LargeTableEntry>, L::Error> {
-        row.lru.insert(offset as u64); // entry will be loaded so no need to check count_as_loaded
-
-        if loader.unload_supported() && row.lru.len() > self.config.max_loaded_entries() {
-            // todo - try to unload Loaded entry even if unload is not supported
-            let unload = row.lru.pop().expect("Lru is not empty");
-            assert_ne!(
-                unload, offset as u64,
-                "Attempting unload entry we are just trying to load"
-            );
-            // todo - we can try different approaches,
-            // for example prioritize unloading Loaded entries over Dirty entries
-            row.data[unload as usize].unload(loader, &self.config)?;
-        }
-        let mut entry = MutexGuard::map(row, |l| &mut l.data[offset]);
-        entry.maybe_load(loader)?;
-        Ok(entry)
-    }
-
     fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
         let ks_table = self.ks_table(ks);
         let (mutex, offset) = ks.locate(k);
