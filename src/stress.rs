@@ -15,6 +15,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
+macro_rules! report {
+    ($report: expr, $($arg:tt)*) => {
+        let line = format!($($arg)*);
+        println!("{line}");
+        $report.lines.push('\n');
+        $report.lines.push_str(&line);
+    };
+}
+
 #[derive(Parser, Debug)]
 struct StressArgs {
     #[arg(long, short = 't', help = "Number of write threads")]
@@ -42,9 +51,12 @@ struct StressArgs {
     no_snapshot: bool,
     #[arg(long, short = 'p', help = "Path for storage temp dir")]
     path: Option<String>,
+    #[arg(long, help = "Print report file", default_value = "false")]
+    report: bool,
 }
 
 pub fn main() {
+    let mut report = Report::default();
     let args = StressArgs::parse();
     let args = Arc::new(args);
     let dir = if let Some(path) = &args.path {
@@ -53,6 +65,7 @@ pub fn main() {
         tempdir::TempDir::new("stress").unwrap()
     };
     println!("Path to storage: {}", dir.path().display());
+    let print_report = args.report;
     let mut config = Config::default();
     config.max_loaded_entries = 32;
     config.max_dirty_keys = 1024;
@@ -64,10 +77,10 @@ pub fn main() {
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let db = Arc::new(db);
     if !args.no_snapshot {
-        println!("Start periodic snapshot");
+        report!(report, "Periodic snapshot **enabled**");
         db.start_periodic_snapshot();
     } else {
-        println!("Periodic snapshot disabled");
+        report!(report, "Periodic snapshot **disabled**");
     }
     let stress = Stress { db, ks, args };
     println!("Starting write test");
@@ -75,14 +88,19 @@ pub fn main() {
     let written = stress.args.writes * stress.args.threads;
     let written_bytes = written * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
-    println!(
-        "Done in {elapsed:?}: {} writes/s, {}/sec",
+    report!(
+        report,
+        "Write test done in {elapsed:?}: {} writes/s, {}/sec",
         dec_div(written / msecs * 1000),
         byte_div(written_bytes / msecs * 1000)
     );
     let wal = Db::wal_path(dir.path());
     let wal_len = fs::metadata(wal).unwrap().len();
-    println!("Wal size {:.1} Gb", wal_len as f64 / 1024. / 1024. / 1024.);
+    report!(
+        report,
+        "Wal size {:.1} Gb",
+        wal_len as f64 / 1024. / 1024. / 1024.
+    );
     println!("Starting read test");
     let manual_stop = if stress.args.background_writes > 0 {
         stress.background(StressThread::run_background_writes)
@@ -94,21 +112,32 @@ pub fn main() {
     let read = stress.args.reads * stress.args.threads;
     let read_bytes = read * stress.args.write_size;
     let msecs = elapsed.as_millis() as usize;
-    println!(
-        "Done in {elapsed:?}: {} reads/s, {}/sec",
+    report!(
+        report,
+        "Read test done in {elapsed:?}: {} reads/s, {}/sec",
         dec_div(read / msecs * 1000),
         byte_div(read_bytes / msecs * 1000)
     );
-    println!(
+    report!(
+        report,
         "Max index size {} entries",
         metrics.max_index_size.load(Ordering::Relaxed)
-    )
+    );
+    if print_report {
+        println!("Writing report file");
+        fs::write("report.txt", &report.lines).unwrap();
+    }
 }
 
 struct Stress {
     db: Arc<Db>,
     ks: KeySpace,
     args: Arc<StressArgs>,
+}
+
+#[derive(Default)]
+struct Report {
+    lines: String,
 }
 
 impl Stress {
