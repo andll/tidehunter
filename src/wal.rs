@@ -302,6 +302,9 @@ impl Wal {
         if prev.is_some() {
             panic!("Re-inserting mapping into wal is not allowed");
         }
+        if maps.len() > self.layout.max_maps {
+            maps.pop_first();
+        }
         map
     }
 
