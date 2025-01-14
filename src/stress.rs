@@ -6,6 +6,7 @@ use bytes::BufMut;
 use clap::Parser;
 use histogram::AtomicHistogram;
 use parking_lot::RwLock;
+use prometheus::Registry;
 use rand::rngs::{StdRng, ThreadRng};
 use rand::{Rng, RngCore, SeedableRng};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,7 +57,9 @@ pub fn main() {
     config.max_loaded_entries = 32;
     config.max_dirty_keys = 1024;
     let config = Arc::new(config);
-    let metrics = Metrics::new();
+    let registry = Registry::new();
+    let metrics = Metrics::new_in(&registry);
+    crate::prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
     let db = Arc::new(db);

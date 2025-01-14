@@ -18,6 +18,7 @@ tempdir = { version = "0.3.7" , optional = true}
 prometheus = "0.13.3"
 tokio = { version = "1.36.0", features = ["full"] }
 histogram = { version = "0.11.1", optional = true }
+axum = { version = "0.6.18", optional = true }
 
 [dev-dependencies]
 tempdir = "0.3.7"
@@ -29,4 +30,5 @@ stress = [
     "tempdir",
     "clap",
     "histogram",
+    "axum",
 ]
