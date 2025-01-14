@@ -430,9 +430,16 @@ impl Db {
 
     fn rebuild_control_region(&self) -> DbResult<()> {
         let mut crs = self.control_region_store.lock();
+        let _timer = self
+            .metrics
+            .rebuild_control_region_time_mcs
+            .clone()
+            .mcs_timer();
         // drop large_table lock asap
         // todo (critical) read lock need to cover wal allocation and insert to large table!!
+        let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
         let snapshot = self.large_table.write().snapshot();
+        drop(_snapshot_timer);
         let last_added_position = snapshot.last_added_position();
         let last_added_position = last_added_position.unwrap_or(WalPosition::INVALID);
         let snapshot = self.write_snapshot(snapshot)?;

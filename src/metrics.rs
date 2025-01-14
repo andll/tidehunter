@@ -26,6 +26,9 @@ pub struct Metrics {
     pub wal_contention: Histogram,
     pub db_op_mcs: HistogramVec,
     pub map_time_mcs: Histogram,
+
+    pub snapshot_lock_time_mcs: Histogram,
+    pub rebuild_control_region_time_mcs: Histogram,
 }
 
 #[macro_export]
@@ -59,6 +62,8 @@ impl Metrics {
 
     pub fn new_in(registry: &Registry) -> Arc<Self> {
         let index_size_buckets = exponential_buckets(100., 2., 20).unwrap();
+        let snapshot_buckets = exponential_buckets(500., 2., 12).unwrap();
+        let rebuild_buckets = exponential_buckets(2000., 2., 12).unwrap();
         let lookup_buckets = exponential_buckets(5., 1.4, 25).unwrap();
         let db_op_buckets = exponential_buckets(5., 1.4, 25).unwrap();
         let lock_buckets = exponential_buckets(1., 1.5, 12).unwrap();
@@ -91,6 +96,17 @@ impl Metrics {
             wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
+
+            snapshot_lock_time_mcs: histogram!(
+                "snapshot_lock_time_mcs",
+                snapshot_buckets,
+                registry
+            ),
+            rebuild_control_region_time_mcs: histogram!(
+                "rebuild_control_region_time_mcs",
+                rebuild_buckets,
+                registry
+            ),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)
