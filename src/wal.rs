@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Instant;
-use std::{io, mem, thread};
+use std::{io, mem, ptr, thread};
 
 pub struct WalWriter {
     wal: Arc<Wal>,
@@ -90,7 +90,7 @@ impl WalWriter {
             // Asynchronously flush the filled mem map
             // todo evaluate to make sure this does not hurt performance in real app
             mmap_mut.flush_async()?;
-            position_map.1 = self.wal.recv_map(&self.mapper, map_id);
+            position_map.1 = self.wal.recv_map(&self.mapper, map_id, &position_map.1);
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
             // assert_eq!(pos, align(prev_block_end));
@@ -291,7 +291,7 @@ impl Wal {
         maps.get(&id).cloned()
     }
 
-    fn recv_map(&self, wal_mapper: &WalMapper, expect_id: u64) -> Map {
+    fn recv_map(&self, wal_mapper: &WalMapper, expect_id: u64, pin_map: &Map) -> Map {
         let map = wal_mapper.next_map();
         assert_eq!(
             map.id, expect_id,
@@ -302,6 +302,14 @@ impl Wal {
         if prev.is_some() {
             panic!("Re-inserting mapping into wal is not allowed");
         }
+        let pin_map_entry = maps.get_mut(&pin_map.id).expect("Pin map not found");
+        assert!(
+            ptr::eq(pin_map.data.as_ptr(), pin_map_entry.data.as_ptr()),
+            "Pin map entry and located map do not match"
+        );
+        pin_map_entry.writeable = false;
+        // Remove memory mapping and copy over data to a regular byte array
+        pin_map_entry.data = Bytes::copy_from_slice(&pin_map.data);
         if maps.len() > self.layout.max_maps {
             maps.pop_first();
         }
