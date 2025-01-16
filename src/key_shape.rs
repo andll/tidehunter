@@ -36,6 +36,7 @@ pub struct KeySpaceConfig {
     key_offset: usize,
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
+    bloom_filter: bool,
 }
 
 // todo - we want better compactor API that does not expose too much internal details
@@ -194,6 +195,10 @@ impl KeySpaceDesc {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
 
+    pub(crate) fn bloom_filter(&self) -> bool {
+        self.config.bloom_filter
+    }
+
     pub(crate) fn unloading_disabled(&self) -> bool {
         self.config.disable_unload
     }
@@ -217,6 +222,7 @@ impl KeySpaceConfig {
             key_offset,
             compactor: None,
             disable_unload: false,
+            bloom_filter: false,
         }
     }
 
@@ -227,6 +233,11 @@ impl KeySpaceConfig {
 
     pub fn disable_unload(mut self) -> Self {
         self.disable_unload = true;
+        self
+    }
+
+    pub fn with_bloom_filter(mut self) -> Self {
+        self.bloom_filter = true;
         self
     }
 }

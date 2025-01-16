@@ -685,7 +685,7 @@ impl From<bincode::Error> for DbError {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::key_shape::KeyShapeBuilder;
+    use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
     use std::collections::HashSet;
 
     #[test]
@@ -1095,7 +1095,56 @@ mod test {
     }
 
     #[test]
-    pub fn test_dirty_unloading() {
+    fn test_bloom_filter() {
+        let dir = tempdir::TempDir::new("test-bloom-filter").unwrap();
+        let config = Arc::new(Config::small());
+        let mut ksb = KeyShapeBuilder::new();
+        let ksc = KeySpaceConfig::new().with_bloom_filter();
+        let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
+        let key_shape = ksb.build();
+        let metrics = Metrics::new();
+        let db = Arc::new(
+            Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                metrics.clone(),
+            )
+            .unwrap(),
+        );
+
+        for i in 0..1000u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
+        }
+
+        for i in 0..1000u64 {
+            assert!(db.exists(ks, &i.to_be_bytes()).unwrap());
+        }
+
+        for i in 1000..2000u64 {
+            assert!(!db.exists(ks, &i.to_be_bytes()).unwrap());
+        }
+        let found = metrics
+            .lookup_result
+            .with_label_values(&["k", "found", "cache"])
+            .get()
+            + metrics
+                .lookup_result
+                .with_label_values(&["k", "found", "lookup"])
+                .get();
+        let not_found_bloom = metrics
+            .lookup_result
+            .with_label_values(&["k", "not_found", "bloom"])
+            .get();
+
+        assert_eq!(found, 1000);
+        if not_found_bloom < 900 {
+            panic!("Bloom filter efficiency less then 90%");
+        }
+    }
+
+    #[test]
+    fn test_dirty_unloading() {
         let dir = tempdir::TempDir::new("test-dirty-unloading").unwrap();
         let mut config = Config::small();
         config.max_dirty_keys = 2;

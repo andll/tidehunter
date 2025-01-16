@@ -6,6 +6,7 @@ use crate::primitives::arc_cow::ArcCow;
 use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::{WalPosition, WalRandomRead};
+use bloom::{BloomFilter, ASMS};
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,7 @@ pub struct LargeTableEntry {
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
     metrics: Arc<Metrics>,
+    bloom_filter: Option<BloomFilter>,
 }
 
 enum LargeTableEntryState {
@@ -170,17 +172,24 @@ impl LargeTable {
     ) -> Result<Option<WalPosition>, L::Error> {
         let (mut row, offset) = self.row(ks, k);
         let entry = row.entry_mut(offset);
+        if entry.bloom_filter_not_found(k) {
+            return Ok(self.report_lookup_result(ks, None, "bloom"));
+        }
         let index_position = match entry.state {
-            LargeTableEntryState::Empty => return Ok(None),
-            LargeTableEntryState::Loaded(_) => return Ok(entry.get(k)),
-            LargeTableEntryState::DirtyLoaded(_, _) => return Ok(entry.get(k)),
+            LargeTableEntryState::Empty => return Ok(self.report_lookup_result(ks, None, "cache")),
+            LargeTableEntryState::Loaded(_) => {
+                return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
+            }
+            LargeTableEntryState::DirtyLoaded(_, _) => {
+                return Ok(self.report_lookup_result(ks, entry.get(k), "cache"))
+            }
             LargeTableEntryState::DirtyUnloaded(position, _) => {
                 // optimization: in dirty unloaded state we might not need to load entry
                 if let Some(found) = entry.get(k) {
                     if self.count_as_loaded(entry) {
                         row.lru.insert(offset as u64);
                     }
-                    return Ok(found.valid());
+                    return Ok(self.report_lookup_result(ks, found.valid(), "cache"));
                 }
                 position
             }
@@ -196,7 +205,21 @@ impl LargeTable {
             .lookup_mcs
             .with_label_values(&[index_reader.kind_str(), entry.ks.name()])
             .observe(now.elapsed().as_micros() as f64);
-        Ok(result)
+        Ok(self.report_lookup_result(ks, result, "lookup"))
+    }
+
+    fn report_lookup_result(
+        &self,
+        ks: &KeySpaceDesc,
+        v: Option<WalPosition>,
+        source: &str,
+    ) -> Option<WalPosition> {
+        let found = if v.is_some() { "found" } else { "not_found" };
+        self.metrics
+            .lookup_result
+            .with_label_values(&[ks.name(), found, source])
+            .inc();
+        v
     }
 
     pub fn is_empty(&self) -> bool {
@@ -443,12 +466,18 @@ impl LargeTableEntry {
         state: LargeTableEntryState,
         metrics: Arc<Metrics>,
     ) -> Self {
+        let bloom_filter = if ks.bloom_filter() {
+            Some(BloomFilter::with_rate(0.1, 8000))
+        } else {
+            None
+        };
         Self {
             ks,
             state,
             data: Default::default(),
             last_added_position: Default::default(),
             metrics,
+            bloom_filter,
         }
     }
 
@@ -467,6 +496,7 @@ impl LargeTableEntry {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) {
         let dirty_state = self.state.mark_dirty();
         dirty_state.into_dirty_keys().insert(k.clone());
+        self.insert_bloom_filter(&k);
         let previous = self.data.make_mut().insert(k, v);
         self.report_loaded_keys_change(previous, Some(v));
         self.last_added_position = Some(v);
@@ -497,6 +527,23 @@ impl LargeTableEntry {
             .loaded_keys
             .with_label_values(&[self.ks.name()])
             .add(delta);
+    }
+
+    fn insert_bloom_filter(&mut self, key: &[u8]) {
+        let Some(bloom_filter) = &mut self.bloom_filter else {
+            return;
+        };
+        // todo - rebuild bloom filter from time to time?
+        bloom_filter.insert(&key);
+    }
+
+    /// Returns true if key is definitely not in the cell
+    fn bloom_filter_not_found(&self, key: &[u8]) -> bool {
+        if let Some(bloom_filter) = &self.bloom_filter {
+            !bloom_filter.contains(&key)
+        } else {
+            false
+        }
     }
 
     fn report_loaded_keys_change(&self, old: Option<WalPosition>, new: Option<WalPosition>) {
@@ -732,6 +779,12 @@ impl LargeTableEntryState {
         }
     }
 }
+//
+// #[test]
+// fn test_bloom() {
+//     let f = BloomFilter::with_rate(0.1, 8000);
+//     println!("num_bits {}, num_hashes {}", f.num_bits(), f.num_hashes());
+// }
 
 impl<'a> DirtyState<'a> {
     pub fn into_dirty_keys(self) -> &'a mut HashSet<Bytes> {

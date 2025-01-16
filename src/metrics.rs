@@ -21,6 +21,7 @@ pub struct Metrics {
     pub loaded_keys: IntGaugeVec,
 
     pub lookup_mcs: HistogramVec,
+    pub lookup_result: IntCounterVec,
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
@@ -87,6 +88,8 @@ impl Metrics {
                 lookup_buckets.clone(),
                 registry
             ),
+            lookup_result: counter_vec!("lookup_result", &["ks", "result", "source"], registry),
+
             large_table_contention: histogram_vec!(
                 "large_table_contention",
                 &["ks"],
