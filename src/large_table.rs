@@ -7,6 +7,7 @@ use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
+use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +44,7 @@ enum LargeTableEntryState {
 
 struct Row {
     lru: Lru,
+    value_lru: Option<LruCache<Bytes, Bytes>>,
     data: Box<[LargeTableEntry]>,
 }
 
@@ -98,8 +100,10 @@ impl LargeTable {
                             )
                         })
                         .collect();
+                    let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row {
                         data,
+                        value_lru,
                         lru: Lru::default(),
                     }
                 });
@@ -118,9 +122,13 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         k: Bytes,
         v: WalPosition,
+        value: &Bytes,
         loader: &L,
     ) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(ks, &k);
+        if let Some(value_lru) = &mut row.value_lru {
+            value_lru.push(k.clone(), value.clone());
+        }
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
@@ -155,6 +163,9 @@ impl LargeTable {
         _loader: &L,
     ) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(ks, &k);
+        if let Some(value_lru) = &mut row.value_lru {
+            value_lru.pop(&k);
+        }
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
         if self.count_as_loaded(entry) {
@@ -169,8 +180,17 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         k: &[u8],
         loader: &L,
-    ) -> Result<Option<WalPosition>, L::Error> {
+    ) -> Result<GetResult, L::Error> {
         let (mut row, offset) = self.row(ks, k);
+        if let Some(value_lru) = &mut row.value_lru {
+            if let Some(value) = value_lru.get(k) {
+                self.metrics
+                    .lookup_result
+                    .with_label_values(&[ks.name(), "found", "lru"])
+                    .inc();
+                return Ok(GetResult::Value(value.clone()));
+            }
+        }
         let entry = row.entry_mut(offset);
         if entry.bloom_filter_not_found(k) {
             return Ok(self.report_lookup_result(ks, None, "bloom"));
@@ -213,13 +233,16 @@ impl LargeTable {
         ks: &KeySpaceDesc,
         v: Option<WalPosition>,
         source: &str,
-    ) -> Option<WalPosition> {
+    ) -> GetResult {
         let found = if v.is_some() { "found" } else { "not_found" };
         self.metrics
             .lookup_result
             .with_label_values(&[ks.name(), found, source])
             .inc();
-        v
+        match v {
+            None => GetResult::NotFound,
+            Some(w) => GetResult::WalPosition(w),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -779,12 +802,22 @@ impl LargeTableEntryState {
         }
     }
 }
-//
-// #[test]
-// fn test_bloom() {
-//     let f = BloomFilter::with_rate(0.1, 8000);
-//     println!("num_bits {}, num_hashes {}", f.num_bits(), f.num_hashes());
-// }
+
+pub enum GetResult {
+    Value(Bytes),
+    WalPosition(WalPosition),
+    NotFound,
+}
+
+impl GetResult {
+    pub fn is_found(&self) -> bool {
+        match self {
+            GetResult::Value(_) => true,
+            GetResult::WalPosition(_) => true,
+            GetResult::NotFound => false,
+        }
+    }
+}
 
 impl<'a> DirtyState<'a> {
     pub fn into_dirty_keys(self) -> &'a mut HashSet<Bytes> {

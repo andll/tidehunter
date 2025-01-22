@@ -4,7 +4,7 @@ use crate::wal::PreparedWalWrite;
 use minibytes::Bytes;
 
 pub struct WriteBatch {
-    pub(crate) writes: Vec<(KeySpace, Bytes, PreparedWalWrite)>,
+    pub(crate) writes: Vec<(KeySpace, Bytes, PreparedWalWrite, Bytes)>,
     pub(crate) deletes: Vec<(KeySpace, Bytes, PreparedWalWrite)>,
 }
 
@@ -20,8 +20,8 @@ impl WriteBatch {
         let k = k.into();
         let v = v.into();
         assert!(k.len() <= MAX_KEY_LEN, "Key exceeding max key length");
-        let w = PreparedWalWrite::new(&WalEntry::Record(ks, k.clone(), v));
-        self.writes.push((ks, k, w))
+        let w = PreparedWalWrite::new(&WalEntry::Record(ks, k.clone(), v.clone()));
+        self.writes.push((ks, k, w, v))
     }
 
     pub fn delete(&mut self, ks: KeySpace, k: impl Into<Bytes>) {

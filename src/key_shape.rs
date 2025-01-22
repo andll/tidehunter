@@ -6,6 +6,7 @@ use crate::wal::WalPosition;
 use minibytes::Bytes;
 use std::cmp;
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -37,6 +38,7 @@ pub struct KeySpaceConfig {
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
     bloom_filter: bool,
+    value_cache_size: usize,
 }
 
 // todo - we want better compactor API that does not expose too much internal details
@@ -199,6 +201,10 @@ impl KeySpaceDesc {
         self.config.bloom_filter
     }
 
+    pub(crate) fn value_cache_size(&self) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(self.config.value_cache_size)
+    }
+
     pub(crate) fn unloading_disabled(&self) -> bool {
         self.config.disable_unload
     }
@@ -223,6 +229,7 @@ impl KeySpaceConfig {
             compactor: None,
             disable_unload: false,
             bloom_filter: false,
+            value_cache_size: 0,
         }
     }
 
@@ -238,6 +245,11 @@ impl KeySpaceConfig {
 
     pub fn with_bloom_filter(mut self) -> Self {
         self.bloom_filter = true;
+        self
+    }
+
+    pub fn with_value_cache_size(mut self, size: usize) -> Self {
+        self.value_cache_size = size;
         self
     }
 }

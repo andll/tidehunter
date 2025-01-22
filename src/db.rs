@@ -7,7 +7,8 @@ use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{
-    LargeTable, LargeTableContainer, LargeTableSnapshot, LargeTableSnapshotEntry, Loader, Version,
+    GetResult, LargeTable, LargeTableContainer, LargeTableSnapshot, LargeTableSnapshotEntry,
+    Loader, Version,
 };
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
@@ -170,14 +171,14 @@ impl Db {
         let k = k.into();
         let v = v.into();
         ks.check_key(&k);
-        let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v));
+        let w = PreparedWalWrite::new(&WalEntry::Record(ks.id(), k.clone(), v.clone()));
         self.metrics
             .wal_written_bytes_type
             .with_label_values(&["record"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        self.large_table.read().insert(ks, k, position, self)?;
+        self.large_table.read().insert(ks, k, position, &v, self)?;
         Ok(())
     }
 
@@ -206,11 +207,14 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["get", ks.name()])
             .mcs_timer();
-        let Some(position) = self.large_table.read().get(ks, k, self)? else {
-            return Ok(None);
-        };
-        let value = self.read_record(k, position)?;
-        Ok(Some(value))
+        match self.large_table.read().get(ks, k, self)? {
+            GetResult::Value(value) => Ok(Some(value)),
+            GetResult::WalPosition(w) => {
+                let value = self.read_record(k, w)?;
+                Ok(Some(value))
+            }
+            GetResult::NotFound => Ok(None),
+        }
     }
 
     pub fn exists(&self, ks: KeySpace, k: &[u8]) -> DbResult<bool> {
@@ -220,7 +224,7 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["exists", ks.name()])
             .mcs_timer();
-        Ok(self.large_table.read().get(ks, k, self)?.is_some())
+        Ok(self.large_table.read().get(ks, k, self)?.is_found())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
@@ -228,7 +232,7 @@ impl Db {
         let lock = self.large_table.read();
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
-        for (ks, k, w) in writes {
+        for (ks, k, w, value) in writes {
             self.metrics
                 .wal_written_bytes_type
                 .with_label_values(&["record"])
@@ -236,7 +240,7 @@ impl Db {
             let position = self.wal_writer.write(&w)?;
             let ks = self.key_shape.ks(ks);
             ks.check_key(&k);
-            lock.insert(ks, k, position, self)?;
+            lock.insert(ks, k, position, &value, self)?;
             last_position = position;
         }
 
@@ -412,10 +416,10 @@ impl Db {
             let (position, entry) = entry?;
             let entry = WalEntry::from_bytes(entry);
             match entry {
-                WalEntry::Record(ks, k, _v) => {
+                WalEntry::Record(ks, k, v) => {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
-                    large_table.insert(ks, k, position, wal_iterator.wal())?;
+                    large_table.insert(ks, k, position, &v, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
@@ -1092,6 +1096,40 @@ mod test {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn test_value_cache() {
+        let dir = tempdir::TempDir::new("test-value-cache").unwrap();
+        let config = Arc::new(Config::small());
+        let mut ksb = KeyShapeBuilder::new();
+        let ksc = KeySpaceConfig::new().with_value_cache_size(512);
+        let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
+        let key_shape = ksb.build();
+        let metrics = Metrics::new();
+        let db = Arc::new(
+            Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                metrics.clone(),
+            )
+            .unwrap(),
+        );
+
+        for i in 0..1024u64 {
+            db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
+        }
+        for i in (0..1024u64).rev() {
+            assert!(db.get(ks, &i.to_be_bytes()).unwrap().is_some());
+        }
+
+        let found_lru = metrics
+            .lookup_result
+            .with_label_values(&["k", "found", "lru"])
+            .get();
+
+        assert_eq!(found_lru, 512);
     }
 
     #[test]
