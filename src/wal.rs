@@ -231,7 +231,13 @@ impl Wal {
         const INITIAL_READ_SIZE: usize = 4 * 1024; // todo probably need to increase even more
         let (map, offset) = self.layout.locate(pos.0);
         if let Some(map) = self.get_map(map) {
-            Ok((true, CrcFrame::read_from_bytes(&map.data, offset as usize)?))
+            // using CrcFrame::read_from_slice to avoid holding the larger byte array
+            Ok((
+                true,
+                CrcFrame::read_from_slice(&map.data, offset as usize)?
+                    .to_vec()
+                    .into(),
+            ))
         } else {
             let mut buf = BytesMut::zeroed(INITIAL_READ_SIZE);
             let read = self.file.read_at(&mut buf, pos.0)?;
