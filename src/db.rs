@@ -211,6 +211,9 @@ impl Db {
             GetResult::Value(value) => Ok(Some(value)),
             GetResult::WalPosition(w) => {
                 let value = self.read_record(k, w)?;
+                self.large_table
+                    .read()
+                    .update_lru(ks, k.to_vec().into(), value.clone());
                 Ok(Some(value))
             }
             GetResult::NotFound => Ok(None),

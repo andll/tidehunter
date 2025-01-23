@@ -175,6 +175,17 @@ impl LargeTable {
         Ok(())
     }
 
+    pub fn update_lru(&self, ks: &KeySpaceDesc, key: Bytes, value: Bytes) {
+        if ks.value_cache_size().is_none() {
+            return;
+        }
+        let (mut row, offset) = self.row(ks, &key);
+        let Some(value_lru) = &mut row.value_lru else {
+            unreachable!()
+        };
+        value_lru.push(key, value);
+    }
+
     pub fn get<L: Loader>(
         &self,
         ks: &KeySpaceDesc,
