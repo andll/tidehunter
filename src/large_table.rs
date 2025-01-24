@@ -501,7 +501,7 @@ impl LargeTableEntry {
         metrics: Arc<Metrics>,
     ) -> Self {
         let bloom_filter = if ks.bloom_filter() {
-            Some(BloomFilter::with_rate(0.1, 8000))
+            Some(BloomFilter::with_rate(0.01, 8000))
         } else {
             None
         };
@@ -973,5 +973,11 @@ mod tests {
         assert_eq!(row.entry_mut(offset).ks.name(), "a");
         let (mut row, offset) = l.row(ks.ks(b), &[5, 2, 3, 4]);
         assert_eq!(row.entry_mut(offset).ks.name(), "b");
+    }
+
+    #[test]
+    fn test_bloom_size() {
+        let f = BloomFilter::with_rate(0.01, 8000);
+        println!("hashes: {}, bytes: {}", f.num_hashes(), f.num_bits() / 8);
     }
 }
