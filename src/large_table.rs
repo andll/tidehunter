@@ -179,7 +179,7 @@ impl LargeTable {
         if ks.value_cache_size().is_none() {
             return;
         }
-        let (mut row, offset) = self.row(ks, &key);
+        let (mut row, _offset) = self.row(ks, &key);
         let Some(value_lru) = &mut row.value_lru else {
             unreachable!()
         };
