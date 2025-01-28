@@ -67,7 +67,6 @@ pub fn main() {
     println!("Path to storage: {}", dir.path().display());
     let print_report = args.report;
     let mut config = Config::default();
-    config.max_loaded_entries = 32;
     config.max_dirty_keys = 1024;
     let config = Arc::new(config);
     let registry = Registry::new();
