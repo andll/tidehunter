@@ -1140,7 +1140,7 @@ mod test {
         let dir = tempdir::TempDir::new("test-bloom-filter").unwrap();
         let config = Arc::new(Config::small());
         let mut ksb = KeyShapeBuilder::new();
-        let ksc = KeySpaceConfig::new().with_bloom_filter();
+        let ksc = KeySpaceConfig::new().with_bloom_filter(0.01, 2000);
         let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();

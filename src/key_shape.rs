@@ -37,8 +37,14 @@ pub struct KeySpaceConfig {
     key_offset: usize,
     compactor: Option<Arc<Compactor>>,
     disable_unload: bool,
-    bloom_filter: bool,
+    bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct BloomFilterParams {
+    pub rate: f32,
+    pub count: u32,
 }
 
 // todo - we want better compactor API that does not expose too much internal details
@@ -197,8 +203,8 @@ impl KeySpaceDesc {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
 
-    pub(crate) fn bloom_filter(&self) -> bool {
-        self.config.bloom_filter
+    pub(crate) fn bloom_filter(&self) -> Option<&BloomFilterParams> {
+        self.config.bloom_filter.as_ref()
     }
 
     pub(crate) fn value_cache_size(&self) -> Option<NonZeroUsize> {
@@ -228,7 +234,7 @@ impl KeySpaceConfig {
             key_offset,
             compactor: None,
             disable_unload: false,
-            bloom_filter: false,
+            bloom_filter: None,
             value_cache_size: 0,
         }
     }
@@ -243,8 +249,8 @@ impl KeySpaceConfig {
         self
     }
 
-    pub fn with_bloom_filter(mut self) -> Self {
-        self.bloom_filter = true;
+    pub fn with_bloom_filter(mut self, rate: f32, count: u32) -> Self {
+        self.bloom_filter = Some(BloomFilterParams { rate, count });
         self
     }
 

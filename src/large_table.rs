@@ -478,11 +478,9 @@ impl LargeTableEntry {
         state: LargeTableEntryState,
         metrics: Arc<Metrics>,
     ) -> Self {
-        let bloom_filter = if ks.bloom_filter() {
-            Some(BloomFilter::with_rate(0.01, 8000))
-        } else {
-            None
-        };
+        let bloom_filter = ks
+            .bloom_filter()
+            .map(|params| BloomFilter::with_rate(params.rate, params.count));
         Self {
             ks,
             state,
