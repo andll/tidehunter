@@ -90,6 +90,21 @@ impl Db {
             .unwrap();
     }
 
+    pub fn start_snapshot_stat_report(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        thread::Builder::new()
+            .name("snapshot-report".to_string())
+            .spawn(move || Self::periodic_snapshot_stat_thread(weak))
+            .unwrap();
+    }
+    fn periodic_snapshot_stat_thread(weak: Weak<Db>) -> Option<()> {
+        loop {
+            thread::sleep(Duration::from_secs(30));
+            let db = weak.upgrade()?;
+            db.large_table.read().report_snapshot_stat();
+            db.large_table.read().report_entries_state();
+        }
+    }
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         loop {
             thread::sleep(Duration::from_secs(30));

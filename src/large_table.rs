@@ -10,7 +10,7 @@ use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
 use std::collections::{HashMap, HashSet};
-use std::mem;
+use std::{cmp, mem};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -275,6 +275,31 @@ impl LargeTable {
         self.table
             .get(ks.id().as_usize())
             .expect("Table not found for ks")
+    }
+
+    pub fn report_snapshot_stat(&self) {
+        for ks_table in self.table.iter() {
+            let mut lowest_position = i64::MAX;
+            let mut name: Option<String> = None;
+            for mutex in ks_table.mutexes() {
+                let row = mutex.lock();
+                for entry in &row.data {
+                    if name.is_none() {
+                        name = Some(entry.ks.name().to_string());
+                    }
+                    let index_position = match entry.state {
+                        LargeTableEntryState::Empty => continue,
+                        LargeTableEntryState::Unloaded(w) => w,
+                        LargeTableEntryState::Loaded(w) => w,
+                        LargeTableEntryState::DirtyUnloaded(w, _) => w,
+                        LargeTableEntryState::DirtyLoaded(w, _) => w,
+                    };
+                    let index_position = index_position.as_u64() as i64;
+                    lowest_position = cmp::min(lowest_position, index_position);
+                }
+            }
+            self.metrics.oldest_index_position.with_label_values(&[&name.unwrap()]).set(lowest_position);
+        }
     }
 
     /// Provides a snapshot of this large table.

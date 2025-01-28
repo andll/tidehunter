@@ -19,6 +19,7 @@ pub struct Metrics {
     pub read: IntCounterVec,
     pub read_bytes: IntCounterVec,
     pub loaded_keys: IntGaugeVec,
+    pub oldest_index_position: IntGaugeVec,
 
     pub lookup_mcs: HistogramVec,
     pub lookup_result: IntCounterVec,
@@ -81,6 +82,7 @@ impl Metrics {
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
             loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
+            oldest_index_position: gauge_vec!("oldest_index_position", &["ks"], registry),
 
             lookup_mcs: histogram_vec!(
                 "lookup_mcs",
