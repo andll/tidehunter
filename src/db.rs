@@ -1189,7 +1189,6 @@ mod test {
         let dir = tempdir::TempDir::new("test-dirty-unloading").unwrap();
         let mut config = Config::small();
         config.max_dirty_keys = 2;
-        config.max_loaded_entries = 1;
         let config = Arc::new(config);
         let (key_shape, ks) = KeyShape::new_single(5, 2, 1024);
         #[track_caller]

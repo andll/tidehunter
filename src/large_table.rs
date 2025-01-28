@@ -3,7 +3,6 @@ use crate::index_table::IndexTable;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::metrics::Metrics;
 use crate::primitives::arc_cow::ArcCow;
-use crate::primitives::lru::Lru;
 use crate::primitives::sharded_mutex::ShardedMutex;
 use crate::wal::{WalPosition, WalRandomRead};
 use bloom::{BloomFilter, ASMS};
@@ -43,7 +42,6 @@ enum LargeTableEntryState {
 }
 
 struct Row {
-    lru: Lru,
     value_lru: Option<LruCache<Bytes, Bytes>>,
     data: Box<[LargeTableEntry]>,
 }
@@ -101,11 +99,7 @@ impl LargeTable {
                         })
                         .collect();
                     let value_lru = ks.value_cache_size().map(LruCache::new);
-                    Row {
-                        data,
-                        value_lru,
-                        lru: Lru::default(),
-                    }
+                    Row { data, value_lru }
                 });
                 ShardedMutex::from_iterator(rows)
             })
@@ -134,7 +128,6 @@ impl LargeTable {
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
             entry.unload(loader, &self.config)?;
-            row.lru.remove(offset as u64);
         }
         self.metrics
             .max_index_size
@@ -168,10 +161,6 @@ impl LargeTable {
         }
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
-        if self.count_as_loaded(entry) {
-            // todo unload
-            row.lru.insert(offset as u64);
-        }
         Ok(())
     }
 
@@ -217,9 +206,6 @@ impl LargeTable {
             LargeTableEntryState::DirtyUnloaded(position, _) => {
                 // optimization: in dirty unloaded state we might not need to load entry
                 if let Some(found) = entry.get(k) {
-                    if self.count_as_loaded(entry) {
-                        row.lru.insert(offset as u64);
-                    }
                     return Ok(self.report_lookup_result(ks, found.valid(), "cache"));
                 }
                 position
@@ -262,14 +248,6 @@ impl LargeTable {
                 .iter()
                 .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
         })
-    }
-
-    fn count_as_loaded(&self, entry: &mut LargeTableEntry) -> bool {
-        if let Some((u, _)) = entry.state.as_unloaded_state() {
-            self.config.excess_dirty_keys(u.dirty_keys_count())
-        } else {
-            true
-        }
     }
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
@@ -382,7 +360,7 @@ impl LargeTable {
                     .with_label_values(&[ks.name()]),
             );
             let entry = row.entry_mut(offset);
-            // todo lru logic
+            // todo read from disk instead of loading
             entry.maybe_load(loader)?;
             if let Some((key, value, next_key)) = entry.next_entry(next_key) {
                 let next_cell = if next_key.is_none() {
@@ -426,7 +404,7 @@ impl LargeTable {
                 .with_label_values(&[ks.name()]),
         );
         let entry = row.entry_mut(offset);
-        // todo lru logic
+        // todo read from disk instead of loading
         entry.maybe_load(loader)?;
         // todo make sure can't have dirty markers in index in this state
         Ok(entry.data.last_in_range(from_included, to_included))
@@ -835,15 +813,6 @@ impl<'a> DirtyState<'a> {
         match self {
             DirtyState::Loaded(dirty_keys) => dirty_keys,
             DirtyState::Unloaded(dirty_keys) => dirty_keys,
-        }
-    }
-}
-
-impl<'a> UnloadedState<'a> {
-    pub fn dirty_keys_count(&self) -> usize {
-        match self {
-            UnloadedState::Dirty(dirty_keys) => dirty_keys.len(),
-            UnloadedState::Clean => 0,
         }
     }
 }

@@ -4,8 +4,6 @@ use crate::wal::WalLayout;
 pub struct Config {
     pub frag_size: u64,
     pub max_maps: usize,
-    /// Maximum number of loaded entries per LargeTable row
-    pub max_loaded_entries: usize,
     /// Maximum number of dirty keys per LargeTable entry before it's counted as loaded
     pub max_dirty_keys: usize,
     /// How often to take snapshot depending on the number of entries written to the wal
@@ -17,7 +15,6 @@ impl Default for Config {
         Self {
             frag_size: 128 * 1024 * 1024,
             max_maps: 16, // Max 2 Gb mapped space
-            max_loaded_entries: 16,
             max_dirty_keys: 16 * 1024,
             snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
         }
@@ -29,7 +26,6 @@ impl Config {
         Self {
             frag_size: 1024 * 1024,
             max_maps: 16,
-            max_loaded_entries: 1024,
             max_dirty_keys: 32,
             snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb
         }
@@ -44,10 +40,6 @@ impl Config {
             frag_size: self.frag_size,
             max_maps: self.max_maps,
         }
-    }
-
-    pub fn max_loaded_entries(&self) -> usize {
-        self.max_loaded_entries
     }
 
     pub fn snapshot_written_bytes(&self) -> u64 {
