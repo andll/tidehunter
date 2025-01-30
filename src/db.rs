@@ -14,7 +14,7 @@ use crate::wal::{
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -23,8 +23,7 @@ use std::time::Duration;
 use std::{io, thread};
 
 pub struct Db {
-    // todo - avoid read lock on reads?
-    large_table: RwLock<LargeTable>,
+    large_table: LargeTable,
     wal: Arc<Wal>,
     wal_writer: WalWriter,
     control_region_store: Mutex<ControlRegionStore>,
@@ -60,7 +59,6 @@ impl Db {
         let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
-        let large_table = RwLock::new(large_table);
         let control_region_store = Mutex::new(control_region_store);
         Ok(Self {
             large_table,
@@ -91,7 +89,7 @@ impl Db {
         loop {
             thread::sleep(Duration::from_secs(30));
             let db = weak.upgrade()?;
-            db.large_table.read().report_entries_state();
+            db.large_table.report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed
             let current_wal_position = db.wal_writer.wal_position();
             let written = current_wal_position.as_u64().checked_sub(position).unwrap();
@@ -176,7 +174,7 @@ impl Db {
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        self.large_table.read().insert(ks, k, position, &v, self)?;
+        self.large_table.insert(ks, k, position, &v, self)?;
         Ok(())
     }
 
@@ -195,7 +193,7 @@ impl Db {
             .with_label_values(&["tombstone"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
-        Ok(self.large_table.read().remove(ks, k, position, self)?)
+        Ok(self.large_table.remove(ks, k, position, self)?)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -205,12 +203,11 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["get", ks.name()])
             .mcs_timer();
-        match self.large_table.read().get(ks, k, self)? {
+        match self.large_table.get(ks, k, self)? {
             GetResult::Value(value) => Ok(Some(value)),
             GetResult::WalPosition(w) => {
                 let value = self.read_record(k, w)?;
                 self.large_table
-                    .read()
                     .update_lru(ks, k.to_vec().into(), value.clone());
                 Ok(Some(value))
             }
@@ -225,12 +222,11 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["exists", ks.name()])
             .mcs_timer();
-        Ok(self.large_table.read().get(ks, k, self)?.is_found())
+        Ok(self.large_table.get(ks, k, self)?.is_found())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
         // todo implement atomic durability
-        let lock = self.large_table.read();
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
         for (ks, k, w, value) in writes {
@@ -241,7 +237,7 @@ impl Db {
             let position = self.wal_writer.write(&w)?;
             let ks = self.key_shape.ks(ks);
             ks.check_key(&k);
-            lock.insert(ks, k, position, &value, self)?;
+            self.large_table.insert(ks, k, position, &value, self)?;
             last_position = position;
         }
 
@@ -252,7 +248,8 @@ impl Db {
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
             self.key_shape.ks(ks).check_key(&k);
-            lock.remove(self.key_shape.ks(ks), k, position, self)?;
+            self.large_table
+                .remove(self.key_shape.ks(ks), k, position, self)?;
             last_position = position;
         }
         if last_position != WalPosition::INVALID {
@@ -304,7 +301,6 @@ impl Db {
             .range_cell(ks.id(), from_included, to_included);
         let Some((key, position)) =
             self.large_table
-                .read()
                 .last_in_range(ks, cell, from_included, to_included, self)?
         else {
             return Ok(None);
@@ -318,7 +314,7 @@ impl Db {
     /// (warn) Right now it returns true if db was never inserted true,
     /// but may return false if entry was inserted and then deleted.
     pub fn is_empty(&self) -> bool {
-        self.large_table.read().is_empty()
+        self.large_table.is_empty()
     }
 
     pub fn ks_name(&self, ks: KeySpace) -> &str {
@@ -367,7 +363,6 @@ impl Db {
             .mcs_timer();
         let Some((next_cell, next_key, key, wal_position)) =
             self.large_table
-                .read()
                 .next_entry(ks, cell, next_key, self, max_cell_exclusive)?
         else {
             return Ok(None);
@@ -451,7 +446,6 @@ impl Db {
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
         let snapshot = self
             .large_table
-            .read()
             .snapshot(current_wal_position.as_u64(), self)?;
         // todo fsync wal first
         crs.store(snapshot.data, snapshot.last_added_position, &self.metrics)?;
@@ -700,7 +694,7 @@ mod test {
             assert_eq!(Some(vec![7].into()), db.get(ks, &[3, 4, 5, 6]).unwrap());
             db.rebuild_control_region().unwrap();
             assert!(
-                db.large_table.read().is_all_clean(),
+                db.large_table.is_all_clean(),
                 "Some entries are not clean after snapshot"
             );
         }
@@ -1304,7 +1298,7 @@ mod test {
             check_metrics(&db.metrics, 0, 0, 0, 0);
             db.rebuild_control_region().unwrap(); // this puts all entries into clean state
             assert!(
-                db.large_table.read().is_all_clean(),
+                db.large_table.is_all_clean(),
                 "Some entries are not clean after snapshot"
             );
             db.get(ks, &other_key).unwrap().unwrap();
