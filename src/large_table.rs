@@ -17,7 +17,7 @@ use std::time::Instant;
 use std::{cmp, mem};
 
 pub struct LargeTable {
-    table: Vec<ShardedMutex<Row>>,
+    table: Vec<KsTable>,
     config: Arc<Config>,
     metrics: Arc<Metrics>,
 }
@@ -41,6 +41,11 @@ enum LargeTableEntryState {
     Loaded(WalPosition),
     DirtyUnloaded(WalPosition, HashSet<Bytes>),
     DirtyLoaded(WalPosition, HashSet<Bytes>),
+}
+
+struct KsTable {
+    ks: KeySpaceDesc,
+    rows: ShardedMutex<Row>,
 }
 
 struct Row {
@@ -106,7 +111,11 @@ impl LargeTable {
                     let value_lru = ks.value_cache_size().map(LruCache::new);
                     Row { data, value_lru }
                 });
-                ShardedMutex::from_iterator(rows)
+                let rows = ShardedMutex::from_iterator(rows);
+                KsTable {
+                    ks: ks.clone(),
+                    rows,
+                }
             })
             .collect();
         Self {
@@ -249,7 +258,8 @@ impl LargeTable {
 
     pub fn is_empty(&self) -> bool {
         self.table.iter().all(|m| {
-            m.mutexes()
+            m.rows
+                .mutexes()
                 .iter()
                 .all(|m| m.lock().data.iter().all(LargeTableEntry::is_empty))
         })
@@ -278,16 +288,18 @@ impl LargeTable {
     }
 
     fn ks_table(&self, ks: &KeySpaceDesc) -> &ShardedMutex<Row> {
-        self.table
+        &self
+            .table
             .get(ks.id().as_usize())
             .expect("Table not found for ks")
+            .rows
     }
 
     pub fn report_snapshot_stat(&self) {
         for ks_table in self.table.iter() {
             let mut lowest_position = i64::MAX;
             let mut name: Option<String> = None;
-            for mutex in ks_table.mutexes() {
+            for mutex in ks_table.rows.mutexes() {
                 let row = mutex.lock();
                 for entry in &row.data {
                     if name.is_none() {
@@ -320,6 +332,7 @@ impl LargeTable {
             .iter()
             .map(|ks_table| {
                 ks_table
+                    .rows
                     .mutexes()
                     .iter()
                     .map(|mutex| {
@@ -352,7 +365,7 @@ impl LargeTable {
         updates: LargeTableContainer<Option<(Arc<IndexTable>, WalPosition)>>,
     ) {
         for (ks_table, ks_updates) in self.table.iter().zip(updates.0.into_iter()) {
-            for (mutex, row_updates) in ks_table.mutexes().iter().zip(ks_updates.into_iter()) {
+            for (mutex, row_updates) in ks_table.rows.mutexes().iter().zip(ks_updates.into_iter()) {
                 let mut lock = mutex.lock();
                 for (entry, update) in lock.data.iter_mut().zip(row_updates.into_iter()) {
                     let Some((data, position)) = update else {
@@ -447,7 +460,7 @@ impl LargeTable {
     pub fn report_entries_state(&self) {
         let mut states: HashMap<_, i64> = HashMap::new();
         for ks_table in &self.table {
-            for mutex in ks_table.mutexes() {
+            for mutex in ks_table.rows.mutexes() {
                 let lock = mutex.lock();
                 for entry in lock.data.iter() {
                     *states
@@ -467,7 +480,7 @@ impl LargeTable {
     #[cfg(test)]
     pub(crate) fn is_all_clean(&self) -> bool {
         for ks_table in &self.table {
-            for mutex in ks_table.mutexes() {
+            for mutex in ks_table.rows.mutexes() {
                 let mut lock = mutex.lock();
                 for entry in lock.data.iter_mut() {
                     if entry.state.as_dirty_state().is_some() {
