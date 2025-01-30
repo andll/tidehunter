@@ -19,7 +19,7 @@ pub struct Metrics {
     pub read: IntCounterVec,
     pub read_bytes: IntCounterVec,
     pub loaded_keys: IntGaugeVec,
-    pub oldest_index_position: IntGaugeVec,
+    pub index_distance_from_tail: IntGaugeVec,
 
     pub lookup_mcs: HistogramVec,
     pub lookup_result: IntCounterVec,
@@ -30,6 +30,8 @@ pub struct Metrics {
     pub map_time_mcs: Histogram,
 
     pub snapshot_lock_time_mcs: Histogram,
+    pub snapshot_force_unload: IntCounterVec,
+    pub snapshot_written_bytes: IntCounter,
     pub rebuild_control_region_time_mcs: Histogram,
 }
 
@@ -82,7 +84,7 @@ impl Metrics {
             read: counter_vec!("read", &["ks", "kind", "type"], registry),
             read_bytes: counter_vec!("read_bytes", &["ks", "kind", "type"], registry),
             loaded_keys: gauge_vec!("loaded_keys", &["ks"], registry),
-            oldest_index_position: gauge_vec!("oldest_index_position", &["ks"], registry),
+            index_distance_from_tail: gauge_vec!("index_distance_from_tail", &["ks"], registry),
 
             lookup_mcs: histogram_vec!(
                 "lookup_mcs",
@@ -107,6 +109,8 @@ impl Metrics {
                 snapshot_buckets,
                 registry
             ),
+            snapshot_force_unload: counter_vec!("snapshot_force_unload", &["ks"], registry),
+            snapshot_written_bytes: counter!("snapshot_written_bytes", registry),
             rebuild_control_region_time_mcs: histogram!(
                 "rebuild_control_region_time_mcs",
                 rebuild_buckets,

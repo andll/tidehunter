@@ -6,10 +6,7 @@ use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
-use crate::large_table::{
-    GetResult, LargeTable, LargeTableContainer, LargeTableSnapshot, LargeTableSnapshotEntry,
-    Loader, Version,
-};
+use crate::large_table::{GetResult, LargeTable, LargeTableContainer, Loader, Version};
 use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
@@ -90,34 +87,20 @@ impl Db {
             .unwrap();
     }
 
-    pub fn start_snapshot_stat_report(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        thread::Builder::new()
-            .name("snapshot-report".to_string())
-            .spawn(move || Self::periodic_snapshot_stat_thread(weak))
-            .unwrap();
-    }
-    fn periodic_snapshot_stat_thread(weak: Weak<Db>) -> Option<()> {
-        loop {
-            thread::sleep(Duration::from_secs(30));
-            let db = weak.upgrade()?;
-            db.large_table.read().report_snapshot_stat();
-            db.large_table.read().report_entries_state();
-        }
-    }
     fn periodic_snapshot_thread(weak: Weak<Db>, mut position: u64) -> Option<()> {
         loop {
             thread::sleep(Duration::from_secs(30));
             let db = weak.upgrade()?;
             db.large_table.read().report_entries_state();
             // todo when we get to wal position wrapping around this will need to be fixed
-            let current_position = db.wal_writer.position();
-            let written = current_position.checked_sub(position).unwrap();
+            let current_wal_position = db.wal_writer.wal_position();
+            let written = current_wal_position.as_u64().checked_sub(position).unwrap();
             if written > db.config.snapshot_written_bytes() {
                 // todo taint db instance on failure?
-                db.rebuild_control_region()
+                let snapshot_position = db
+                    .rebuild_control_region_from(current_wal_position)
                     .expect("Failed to rebuild control region");
-                position = db.wal_writer.position();
+                position = snapshot_position.as_u64();
             }
         }
     }
@@ -450,54 +433,29 @@ impl Db {
         }
     }
 
-    fn rebuild_control_region(&self) -> DbResult<()> {
+    #[cfg(test)]
+    fn rebuild_control_region(&self) -> DbResult<WalPosition> {
+        self.rebuild_control_region_from(self.wal_writer.wal_position())
+    }
+
+    fn rebuild_control_region_from(
+        &self,
+        current_wal_position: WalPosition,
+    ) -> DbResult<WalPosition> {
         let mut crs = self.control_region_store.lock();
         let _timer = self
             .metrics
             .rebuild_control_region_time_mcs
             .clone()
             .mcs_timer();
-        // drop large_table lock asap
-        // todo (critical) read lock need to cover wal allocation and insert to large table!!
         let _snapshot_timer = self.metrics.snapshot_lock_time_mcs.clone().mcs_timer();
-        let snapshot = self.large_table.write().snapshot();
-        drop(_snapshot_timer);
-        let last_added_position = snapshot.last_added_position();
-        let last_added_position = last_added_position.unwrap_or(WalPosition::INVALID);
-        let snapshot = self.write_snapshot(snapshot)?;
+        let snapshot = self
+            .large_table
+            .read()
+            .snapshot(current_wal_position.as_u64(), self)?;
         // todo fsync wal first
-        crs.store(snapshot, last_added_position)
-    }
-
-    fn write_snapshot(
-        &self,
-        snapshot: LargeTableSnapshot,
-    ) -> DbResult<LargeTableContainer<WalPosition>> {
-        let entries = snapshot.into_entries();
-        let snapshot_and_updates = entries.try_map(|entry| self.write_entry_snapshot(entry))?;
-        let (snapshot, index_updates) = snapshot_and_updates.unzip();
-        self.large_table.read().maybe_update_entries(index_updates);
-        Ok(snapshot)
-    }
-
-    fn write_entry_snapshot(
-        &self,
-        entry: LargeTableSnapshotEntry,
-    ) -> DbResult<(WalPosition, Option<(Arc<IndexTable>, WalPosition)>)> {
-        match entry {
-            LargeTableSnapshotEntry::Empty => Ok((WalPosition::INVALID, None)),
-            LargeTableSnapshotEntry::Clean(pos) => Ok((pos, None)),
-            LargeTableSnapshotEntry::Dirty(ks, index) => {
-                let position = self.write_index(ks, &index)?;
-                Ok((position, Some((index, position))))
-            }
-            LargeTableSnapshotEntry::DirtyUnloaded(ks, pos, index) => {
-                let mut clean = self.load(self.key_shape.ks(ks), pos)?;
-                clean.merge_dirty(&index);
-                let position = self.write_index(ks, &clean)?;
-                Ok((position, Some((index, position))))
-            }
-        }
+        crs.store(snapshot.data, snapshot.last_added_position, &self.metrics)?;
+        Ok(snapshot.last_added_position)
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
@@ -542,6 +500,7 @@ impl ControlRegionStore {
         &mut self,
         snapshot: LargeTableContainer<WalPosition>,
         last_position: WalPosition,
+        metrics: &Metrics,
     ) -> DbResult<()> {
         let control_region = ControlRegion::new(snapshot, self.increment_version(), last_position);
         let frame = CrcFrame::new(&control_region);
@@ -554,6 +513,7 @@ impl ControlRegionStore {
             &mut self.cr_map[..frame.len_with_header()]
         };
         write_to.copy_from_slice(frame.as_ref());
+        metrics.snapshot_written_bytes.inc_by(write_to.len() as u64);
         self.cr_map.flush()?;
         self.last_written_left = !self.last_written_left;
         Ok(())
@@ -732,7 +692,7 @@ mod test {
             let db = Db::open(
                 dir.path(),
                 key_shape.clone(),
-                config.clone(),
+                force_unload_config(&config),
                 Metrics::new(),
             )
             .unwrap();
@@ -865,7 +825,7 @@ mod test {
             let db = Db::open(
                 dir.path(),
                 key_shape.clone(),
-                config.clone(),
+                force_unload_config(&config),
                 Metrics::new(),
             )
             .unwrap();
@@ -1335,7 +1295,7 @@ mod test {
                 Db::open(
                     dir.path(),
                     key_shape.clone(),
-                    config.clone(),
+                    force_unload_config(&config),
                     Metrics::new(),
                 )
                 .unwrap(),
@@ -1348,7 +1308,13 @@ mod test {
                 "Some entries are not clean after snapshot"
             );
             db.get(ks, &other_key).unwrap().unwrap();
-            check_metrics(&db.metrics, 0, 0, 0, 0);
+            check_metrics(&db.metrics, 0, 2, 0, 0);
         }
+    }
+
+    fn force_unload_config(config: &Config) -> Arc<Config> {
+        let mut config2 = Config::clone(config);
+        config2.snapshot_unload_threshold = 0;
+        Arc::new(config2)
     }
 }

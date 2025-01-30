@@ -3,6 +3,7 @@ use rand::Rng;
 use std::cmp;
 
 // todo - remove pub
+#[cfg_attr(test, derive(Clone))] // Look for Config::clone(...) for usages
 pub struct Config {
     pub frag_size: u64,
     pub max_maps: usize,
@@ -10,6 +11,8 @@ pub struct Config {
     pub max_dirty_keys: usize,
     /// How often to take snapshot depending on the number of entries written to the wal
     pub snapshot_written_bytes: u64,
+    /// Force unload dirty entry if it's distance from wal tail exceeds given value
+    pub snapshot_unload_threshold: u64,
 }
 
 impl Default for Config {
@@ -19,6 +22,7 @@ impl Default for Config {
             max_maps: 16, // Max 2 Gb mapped space
             max_dirty_keys: 16 * 1024,
             snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
+            snapshot_unload_threshold: 2 * 2 * 1024 * 1024 * 1024, // 4 Gb
         }
     }
 }
@@ -30,6 +34,7 @@ impl Config {
             max_maps: 16,
             max_dirty_keys: 32,
             snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb
+            snapshot_unload_threshold: 2 * 128 * 1024 * 1024, // 256 Mb
         }
     }
 
@@ -54,6 +59,10 @@ impl Config {
 
     fn max_dirty_keys_jitter(&self) -> usize {
         cmp::max(1, self.max_dirty_keys / 10)
+    }
+
+    pub fn snapshot_unload_threshold(&self) -> u64 {
+        self.snapshot_unload_threshold
     }
 
     #[inline]

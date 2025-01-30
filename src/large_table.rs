@@ -57,17 +57,8 @@ struct Row {
 pub(crate) struct LargeTableContainer<T>(pub Vec<Vec<Vec<T>>>);
 
 pub(crate) struct LargeTableSnapshot {
-    data: LargeTableContainer<LargeTableSnapshotEntry>,
-    last_added_position: Option<WalPosition>,
-}
-
-/// ks -> row -> cell
-
-pub(crate) enum LargeTableSnapshotEntry {
-    Empty,
-    Clean(WalPosition),
-    Dirty(KeySpace, Arc<IndexTable>),
-    DirtyUnloaded(KeySpace, WalPosition, Arc<IndexTable>),
+    pub data: LargeTableContainer<WalPosition>,
+    pub last_added_position: WalPosition,
 }
 
 impl LargeTable {
@@ -141,7 +132,7 @@ impl LargeTable {
         entry.insert(k, v);
         let index_size = entry.data.len();
         if loader.unload_supported() && self.too_many_dirty(entry) {
-            entry.unload(loader, &self.config)?;
+            entry.unload_if_ks_enabled(loader, &self.config)?;
         }
         self.metrics
             .max_index_size
@@ -295,86 +286,124 @@ impl LargeTable {
             .rows
     }
 
-    pub fn report_snapshot_stat(&self) {
-        for ks_table in self.table.iter() {
-            let mut lowest_position = i64::MAX;
-            let mut name: Option<String> = None;
-            for mutex in ks_table.rows.mutexes() {
-                let row = mutex.lock();
-                for entry in &row.data {
-                    if name.is_none() {
-                        name = Some(entry.ks.name().to_string());
-                    }
-                    let index_position = match entry.state {
-                        LargeTableEntryState::Empty => continue,
-                        LargeTableEntryState::Unloaded(w) => w,
-                        LargeTableEntryState::Loaded(w) => w,
-                        LargeTableEntryState::DirtyUnloaded(w, _) => w,
-                        LargeTableEntryState::DirtyLoaded(w, _) => w,
-                    };
-                    let index_position = index_position.as_u64() as i64;
-                    lowest_position = cmp::min(lowest_position, index_position);
-                }
-            }
-            self.metrics
-                .oldest_index_position
-                .with_label_values(&[&name.unwrap()])
-                .set(lowest_position);
-        }
-    }
-
-    /// Provides a snapshot of this large table.
-    /// Takes &mut reference to ensure consistency of last_added_position.
-    pub fn snapshot(&mut self) -> LargeTableSnapshot {
-        let mut last_added_position = None;
-        let data = self
-            .table
-            .iter()
-            .map(|ks_table| {
-                ks_table
-                    .rows
-                    .mutexes()
-                    .iter()
-                    .map(|mutex| {
-                        let mut lock = mutex.lock();
-                        lock.data
-                            .iter_mut()
-                            .map(|entry| {
-                                let snapshot = entry.snapshot();
-                                LargeTableSnapshot::update_last_added_position(
-                                    &mut last_added_position,
-                                    entry.last_added_position,
-                                );
-                                snapshot
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect();
-        let data = LargeTableContainer(data);
-        LargeTableSnapshot {
-            data,
-            last_added_position,
-        }
-    }
-
-    /// Update dirty entries to 'Loaded', if they have not changed since the time snapshot was taken.
-    pub fn maybe_update_entries(
+    /// Provides a snapshot of this large table along with replay position in the wal for the snapshot.
+    pub fn snapshot<L: Loader>(
         &self,
-        updates: LargeTableContainer<Option<(Arc<IndexTable>, WalPosition)>>,
-    ) {
-        for (ks_table, ks_updates) in self.table.iter().zip(updates.0.into_iter()) {
-            for (mutex, row_updates) in ks_table.rows.mutexes().iter().zip(ks_updates.into_iter()) {
-                let mut lock = mutex.lock();
-                for (entry, update) in lock.data.iter_mut().zip(row_updates.into_iter()) {
-                    let Some((data, position)) = update else {
-                        continue;
-                    };
-                    entry.maybe_set_to_clean(&data, position);
-                }
+        tail_position: u64,
+        loader: &L,
+    ) -> Result<LargeTableSnapshot, L::Error> {
+        assert!(loader.unload_supported());
+        // See ks_snapshot documentation for details
+        // on how snapshot replay position is determined.
+        let mut replay_from = None;
+        let mut max_position: Option<WalPosition> = None;
+        let mut data = Vec::with_capacity(self.table.len());
+        for ks_table in self.table.iter() {
+            let (ks_data, ks_replay_from, ks_max_position) =
+                self.ks_snapshot(ks_table, tail_position, loader)?;
+            data.push(ks_data);
+            if let Some(ks_replay_from) = ks_replay_from {
+                replay_from = Some(cmp::min(
+                    replay_from.unwrap_or(WalPosition::MAX),
+                    ks_replay_from,
+                ));
+            }
+            if let Some(ks_max_position) = ks_max_position {
+                max_position = Some(if let Some(max_position) = max_position {
+                    cmp::max(ks_max_position, max_position)
+                } else {
+                    ks_max_position
+                });
             }
         }
+
+        let replay_from =
+            replay_from.unwrap_or_else(|| max_position.unwrap_or(WalPosition::INVALID));
+
+        let data = LargeTableContainer(data);
+        Ok(LargeTableSnapshot {
+            data,
+            last_added_position: replay_from,
+        })
+    }
+
+    /// Takes snapshot of a given key space.
+    /// Returns (Snapshot, ReplayFrom, MaximumValidEntryWalPosition).
+    ///
+    /// Replay from is calculated as the lowest wal position across all dirty entries
+    /// Replay from is None if all entries in ks are clean entries.
+    ///
+    /// Maximum valid entry wal position is a maximum wal position of all entries persisted to disk
+    /// This position is None if no entries are persisted to disk (all entries are Empty).
+    ///
+    /// The combined snapshot replay position across all key spaces is determined as following:
+    ///
+    /// * If at least one replay_from for ks table is not None, the replay_from for entire snapshot
+    ///   is a minimum across all key spaces where replay_from is not None.
+    ///   Reasoning here is that if some key space has some dirty entry,
+    ///   the entire snapshot needs to be replayed from the position of that dirty entry.
+    ///
+    /// * If all the ReplayFrom are None, the replay position for snapshot
+    ///   is a maximum of all non-None MaximumValidEntryWalPosition across all key spaces.
+    ///   The Reasoning is that if all entries in all key spaces are clean, it is safe to replay
+    ///   wal from the highest written index entry.
+    ///   As more entries could be added to the wal while snapshot is created,
+    ///   we cannot simply take the current wal writer position here as a snapshot replay position.
+    ///
+    /// * If all ReplayFrom are None and all MaximumValidEntryWalPosition are None,
+    ///   then the database is empty at the time of a snapshot, and the replay_position
+    ///   for snapshot is set to WalPosition::INVALID to indicate wal needs to be replayed
+    ///   from the beginning.
+    fn ks_snapshot<L: Loader>(
+        &self,
+        ks_table: &KsTable,
+        tail_position: u64,
+        loader: &L,
+    ) -> Result<
+        (
+            Vec<Vec<WalPosition>>,
+            Option<WalPosition>,
+            Option<WalPosition>,
+        ),
+        L::Error,
+    > {
+        let mut replay_from = None;
+        let mut max_wal_position: Option<WalPosition> = None;
+        let mut ks_data = Vec::with_capacity(ks_table.rows.mutexes().len());
+        for mutex in ks_table.rows.mutexes() {
+            let mut row = mutex.lock();
+            let mut row_data = Vec::with_capacity(row.data.len());
+            for entry in &mut row.data {
+                entry.maybe_unload_for_snapshot(loader, &self.config, tail_position)?;
+                let position = entry.state.wal_position();
+                row_data.push(position);
+                if let Some(valid_position) = position.valid() {
+                    max_wal_position = if let Some(max_wal_position) = max_wal_position {
+                        Some(cmp::max(max_wal_position, valid_position))
+                    } else {
+                        Some(valid_position)
+                    };
+                }
+                if entry.state.is_dirty() {
+                    replay_from = Some(cmp::min(replay_from.unwrap_or(WalPosition::MAX), position));
+                }
+            }
+            ks_data.push(row_data);
+        }
+        let metric = self
+            .metrics
+            .index_distance_from_tail
+            .with_label_values(&[&ks_table.ks.name()]);
+        match replay_from {
+            None => metric.set(0),
+            Some(WalPosition::INVALID) => metric.set(-1),
+            Some(position) => {
+                // This can go below 0 because tail_position is not synchronized
+                // and index position can be higher than the tail_position in rare cases
+                metric.set(tail_position.saturating_sub(position.as_u64()) as i64)
+            }
+        }
+        Ok((ks_data, replay_from, max_wal_position))
     }
 
     /// Takes a next entry in the large table.
@@ -666,49 +695,47 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn snapshot(&mut self) -> LargeTableSnapshotEntry {
-        match self.state {
-            LargeTableEntryState::Empty => LargeTableSnapshotEntry::Empty,
-            LargeTableEntryState::Unloaded(pos) => LargeTableSnapshotEntry::Clean(pos),
-            LargeTableEntryState::Loaded(pos) => LargeTableSnapshotEntry::Clean(pos),
-            LargeTableEntryState::DirtyLoaded(_, _) => {
-                LargeTableSnapshotEntry::Dirty(self.ks.id(), self.data.clone_shared())
-            }
-            LargeTableEntryState::DirtyUnloaded(pos, _) => {
-                LargeTableSnapshotEntry::DirtyUnloaded(self.ks.id(), pos, self.data.clone_shared())
-            }
+    pub fn maybe_unload_for_snapshot<L: Loader>(
+        &mut self,
+        loader: &L,
+        config: &Config,
+        tail_position: u64,
+    ) -> Result<(), L::Error> {
+        if !self.state.is_dirty() {
+            return Ok(());
         }
+        let position = self.state.wal_position();
+        // position can actually be great then tail_position due to concurrency
+        let distance = tail_position.saturating_sub(position.as_u64());
+        if distance >= config.snapshot_unload_threshold {
+            self.metrics
+                .snapshot_force_unload
+                .with_label_values(&[self.ks.name()])
+                .inc();
+            // todo - we don't need to unload here, only persist the entry,
+            // Just reusing unload logic for now.
+            self.unload(loader, config, true)?;
+        }
+        Ok(())
     }
 
-    /// Updates dirty state to clean state if entry was not updated since the snapshot was taken
-    pub fn maybe_set_to_clean(&mut self, expected: &Arc<IndexTable>, position: WalPosition) {
-        // todo - write amplification can be reduced here:
-        // even when we see that entry has changed,
-        // we still can update Unloaded dirty keys to keep fewer keys in memory
-        // this can reduce write amplification and it will trigger unload less frequently.
-        if !self.data.same_shared(expected) {
-            // The entry has changed since the snapshot was taken
-            return;
-        }
-        match self.state.as_dirty_state() {
-            None => {}
-            // DirtyLoaded changes to Loaded
-            Some(DirtyState::Loaded(_)) => self.state = LargeTableEntryState::Loaded(position),
-            // DirtyUnloaded changes to Unloaded, data is purged
-            // We can also change it to Loaded,
-            // if we send merged Index from the snapshot
-            Some(DirtyState::Unloaded(_)) => {
-                self.report_loaded_keys_delta(-(self.data.len() as i64));
-                self.data = Default::default();
-                self.state = LargeTableEntryState::Unloaded(position)
-            }
-        }
-    }
-
-    pub fn unload<L: Loader>(&mut self, loader: &L, config: &Config) -> Result<(), L::Error> {
+    pub fn unload_if_ks_enabled<L: Loader>(
+        &mut self,
+        loader: &L,
+        config: &Config,
+    ) -> Result<(), L::Error> {
         if self.ks.unloading_disabled() {
             return Ok(());
         }
+        self.unload(loader, config, false)
+    }
+
+    fn unload<L: Loader>(
+        &mut self,
+        loader: &L,
+        config: &Config,
+        force_clean: bool,
+    ) -> Result<(), L::Error> {
         match &self.state {
             LargeTableEntryState::Empty => {}
             LargeTableEntryState::Unloaded(_) => {}
@@ -733,7 +760,7 @@ impl LargeTableEntry {
             }
             LargeTableEntryState::DirtyLoaded(position, dirty_keys) => {
                 // todo - this position can be invalid
-                if config.excess_dirty_keys(dirty_keys.len()) {
+                if force_clean || config.excess_dirty_keys(dirty_keys.len()) {
                     self.metrics.unload.with_label_values(&["flush"]).inc();
                     // either (a) flush and unload -> Unloaded(..)
                     // small code duplicate between here and unload_dirty_unloaded
@@ -838,6 +865,31 @@ impl LargeTableEntryState {
         Some(self.as_dirty_state()?.into_dirty_keys())
     }
 
+    /// Wal position of the persisted index entry.
+    pub fn wal_position(&self) -> WalPosition {
+        match self {
+            LargeTableEntryState::Empty => WalPosition::INVALID,
+            LargeTableEntryState::Unloaded(w) => *w,
+            LargeTableEntryState::Loaded(w) => *w,
+            LargeTableEntryState::DirtyUnloaded(w, _) => *w,
+            LargeTableEntryState::DirtyLoaded(w, _) => *w,
+        }
+    }
+
+    /// Returns whether wal needs to be replayed from the position returned by wal_position()
+    /// to restore large table entry.
+    ///
+    /// This is the same as as_dirty_state().is_some()
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            LargeTableEntryState::Empty => false,
+            LargeTableEntryState::Unloaded(_) => false,
+            LargeTableEntryState::Loaded(_) => false,
+            LargeTableEntryState::DirtyUnloaded(_, _) => true,
+            LargeTableEntryState::DirtyLoaded(_, _) => true,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         match self {
@@ -883,64 +935,6 @@ enum DirtyState<'a> {
 enum UnloadedState<'a> {
     Dirty(&'a mut HashSet<Bytes>),
     Clean,
-}
-
-impl LargeTableSnapshot {
-    pub fn into_entries(self) -> LargeTableContainer<LargeTableSnapshotEntry> {
-        self.data
-    }
-
-    pub fn last_added_position(&self) -> Option<WalPosition> {
-        self.last_added_position
-    }
-
-    fn update_last_added_position(u: &mut Option<WalPosition>, v: Option<WalPosition>) {
-        let Some(v) = v else {
-            return;
-        };
-        if let Some(u) = u {
-            if v > *u {
-                *u = v;
-            }
-        } else {
-            *u = Some(v);
-        }
-    }
-}
-
-impl<T> LargeTableContainer<T> {
-    pub fn try_map<P, E>(self, f: impl Fn(T) -> Result<P, E>) -> Result<LargeTableContainer<P>, E> {
-        let mut new_container = Vec::with_capacity(self.0.len());
-        for ks_table in self.0.into_iter() {
-            let mut new_ks_table = Vec::with_capacity(ks_table.len());
-            for row in ks_table.into_iter() {
-                let mut new_row = Vec::with_capacity(row.len());
-                for element in row {
-                    let new_element = f(element)?;
-                    new_row.push(new_element);
-                }
-                new_ks_table.push(new_row);
-            }
-            new_container.push(new_ks_table);
-        }
-        Ok(LargeTableContainer(new_container))
-    }
-}
-
-impl<A, B> LargeTableContainer<(A, B)> {
-    pub fn unzip(self) -> (LargeTableContainer<A>, LargeTableContainer<B>) {
-        let (a, b) = self
-            .0
-            .into_iter()
-            .map(|ks_table| {
-                ks_table
-                    .into_iter()
-                    .map(|row| row.into_iter().unzip())
-                    .unzip()
-            })
-            .unzip();
-        (LargeTableContainer(a), LargeTableContainer(b))
-    }
 }
 
 impl<T: Copy> LargeTableContainer<T> {

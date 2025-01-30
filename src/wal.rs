@@ -109,6 +109,12 @@ impl WalWriter {
     pub fn position(&self) -> u64 {
         self.position_and_map.lock().0.position
     }
+
+    /// Current un-initialized position,
+    // todo need to re-think this and not return un-initialized position as WalPosition
+    pub fn wal_position(&self) -> WalPosition {
+        WalPosition(self.position_and_map.lock().0.position)
+    }
 }
 
 #[derive(Clone)]
@@ -571,7 +577,8 @@ impl PreparedWalWrite {
 }
 
 impl WalPosition {
-    pub const INVALID: WalPosition = WalPosition(u64::MAX);
+    pub const MAX: WalPosition = WalPosition(u64::MAX);
+    pub const INVALID: WalPosition = Self::MAX;
     pub const LENGTH: usize = 8;
     #[cfg(test)]
     pub const TEST: WalPosition = WalPosition(3311);

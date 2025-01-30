@@ -29,6 +29,7 @@ impl<T: Clone + Default> ArcCow<T> {
         shared
     }
 
+    #[allow(dead_code)]
     pub fn same_shared(&self, other: &Arc<T>) -> bool {
         match self {
             ArcCow::Owned(_) => false,
