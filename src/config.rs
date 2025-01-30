@@ -13,6 +13,8 @@ pub struct Config {
     pub snapshot_written_bytes: u64,
     /// Force unload dirty entry if it's distance from wal tail exceeds given value
     pub snapshot_unload_threshold: u64,
+    /// Percentage for the unload jitter
+    pub unload_jitter_pct: usize,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             max_dirty_keys: 16 * 1024,
             snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
             snapshot_unload_threshold: 2 * 2 * 1024 * 1024 * 1024, // 4 Gb
+            unload_jitter_pct: 10,
         }
     }
 }
@@ -35,6 +38,7 @@ impl Config {
             max_dirty_keys: 32,
             snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb
             snapshot_unload_threshold: 2 * 128 * 1024 * 1024, // 256 Mb
+            unload_jitter_pct: 10,
         }
     }
 
@@ -58,7 +62,7 @@ impl Config {
     }
 
     fn max_dirty_keys_jitter(&self) -> usize {
-        cmp::max(1, self.max_dirty_keys / 10)
+        cmp::max(1, self.max_dirty_keys * self.unload_jitter_pct / 100)
     }
 
     pub fn snapshot_unload_threshold(&self) -> u64 {
