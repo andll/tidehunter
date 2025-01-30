@@ -9,11 +9,12 @@ use bloom::{BloomFilter, ASMS};
 use lru::LruCache;
 use minibytes::Bytes;
 use parking_lot::MutexGuard;
+use rand::rngs::ThreadRng;
 use std::collections::{HashMap, HashSet};
-use std::{cmp, mem};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+use std::{cmp, mem};
 
 pub struct LargeTable {
     table: Vec<ShardedMutex<Row>>,
@@ -31,6 +32,7 @@ pub struct LargeTableEntry {
     state: LargeTableEntryState,
     metrics: Arc<Metrics>,
     bloom_filter: Option<BloomFilter>,
+    unload_jitter: usize,
 }
 
 enum LargeTableEntryState {
@@ -75,6 +77,7 @@ impl LargeTable {
             key_shape.num_ks(),
             "Snapshot has different number of key spaces"
         );
+        let mut rng = ThreadRng::default();
         let table = key_shape
             .iter_ks()
             .zip(snapshot.0.iter())
@@ -91,10 +94,12 @@ impl LargeTable {
                     let data = row_snapshot
                         .iter()
                         .map(|position| {
+                            let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
                             LargeTableEntry::from_snapshot_position(
                                 ks.clone(),
                                 position,
                                 metrics.clone(),
+                                unload_jitter,
                             )
                         })
                         .collect();
@@ -252,7 +257,8 @@ impl LargeTable {
 
     fn too_many_dirty(&self, entry: &mut LargeTableEntry) -> bool {
         if let Some(dk) = entry.state.dirty_keys() {
-            self.config.excess_dirty_keys(dk.len())
+            self.config
+                .excess_dirty_keys(dk.len().saturating_sub(entry.unload_jitter))
         } else {
             false
         }
@@ -298,7 +304,10 @@ impl LargeTable {
                     lowest_position = cmp::min(lowest_position, index_position);
                 }
             }
-            self.metrics.oldest_index_position.with_label_values(&[&name.unwrap()]).set(lowest_position);
+            self.metrics
+                .oldest_index_position
+                .with_label_values(&[&name.unwrap()])
+                .set(lowest_position);
         }
     }
 
@@ -490,18 +499,29 @@ pub trait Loader {
 }
 
 impl LargeTableEntry {
-    pub fn new_unloaded(ks: KeySpaceDesc, position: WalPosition, metrics: Arc<Metrics>) -> Self {
-        Self::new_with_state(ks, LargeTableEntryState::Unloaded(position), metrics)
+    pub fn new_unloaded(
+        ks: KeySpaceDesc,
+        position: WalPosition,
+        metrics: Arc<Metrics>,
+        unload_jitter: usize,
+    ) -> Self {
+        Self::new_with_state(
+            ks,
+            LargeTableEntryState::Unloaded(position),
+            metrics,
+            unload_jitter,
+        )
     }
 
-    pub fn new_empty(ks: KeySpaceDesc, metrics: Arc<Metrics>) -> Self {
-        Self::new_with_state(ks, LargeTableEntryState::Empty, metrics)
+    pub fn new_empty(ks: KeySpaceDesc, metrics: Arc<Metrics>, unload_jitter: usize) -> Self {
+        Self::new_with_state(ks, LargeTableEntryState::Empty, metrics, unload_jitter)
     }
 
     fn new_with_state(
         ks: KeySpaceDesc,
         state: LargeTableEntryState,
         metrics: Arc<Metrics>,
+        unload_jitter: usize,
     ) -> Self {
         let bloom_filter = ks
             .bloom_filter()
@@ -513,6 +533,7 @@ impl LargeTableEntry {
             last_added_position: Default::default(),
             metrics,
             bloom_filter,
+            unload_jitter,
         }
     }
 
@@ -520,11 +541,12 @@ impl LargeTableEntry {
         ks: KeySpaceDesc,
         position: &WalPosition,
         metrics: Arc<Metrics>,
+        unload_jitter: usize,
     ) -> Self {
         if position == &WalPosition::INVALID {
-            LargeTableEntry::new_empty(ks, metrics)
+            LargeTableEntry::new_empty(ks, metrics, unload_jitter)
         } else {
-            LargeTableEntry::new_unloaded(ks, *position, metrics)
+            LargeTableEntry::new_unloaded(ks, *position, metrics, unload_jitter)
         }
     }
 

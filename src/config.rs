@@ -1,4 +1,6 @@
 use crate::wal::WalLayout;
+use rand::Rng;
+use std::cmp;
 
 // todo - remove pub
 pub struct Config {
@@ -44,6 +46,14 @@ impl Config {
 
     pub fn snapshot_written_bytes(&self) -> u64 {
         self.snapshot_written_bytes
+    }
+
+    pub fn gen_dirty_keys_jitter(&self, rng: &mut impl Rng) -> usize {
+        rng.gen_range(0..self.max_dirty_keys_jitter())
+    }
+
+    fn max_dirty_keys_jitter(&self) -> usize {
+        cmp::max(1, self.max_dirty_keys / 10)
     }
 
     #[inline]
