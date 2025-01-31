@@ -98,7 +98,11 @@ impl Db {
                 let snapshot_position = db
                     .rebuild_control_region_from(current_wal_position)
                     .expect("Failed to rebuild control region");
-                position = snapshot_position.as_u64();
+                // Treat WalPosition::INVALID as 0 for accounting purpose
+                position = snapshot_position
+                    .valid()
+                    .map(|p| p.as_u64())
+                    .unwrap_or_default();
             }
         }
     }
