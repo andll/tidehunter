@@ -333,6 +333,10 @@ impl Db {
         self.key_shape.ks(ks).name()
     }
 
+    pub(crate) fn ks(&self, ks: KeySpace) -> &KeySpaceDesc {
+        self.key_shape.ks(ks)
+    }
+
     /// Returns the next entry in the database.
     /// Iterator must specify the cell to inspect and the (Optional) next key.
     ///

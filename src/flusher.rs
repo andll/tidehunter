@@ -1,6 +1,6 @@
 use crate::db::Db;
 use crate::index_table::IndexTable;
-use crate::key_shape::KeySpace;
+use crate::key_shape::{KeySpace, KeySpaceDesc};
 use crate::large_table::Loader;
 use crate::metrics::Metrics;
 use crate::wal::WalPosition;
@@ -80,7 +80,7 @@ impl IndexFlusherThread {
             let Some(db) = self.db.upgrade() else {
                 return;
             };
-            let (original_index, merged_index) = match command.flush_kind {
+            let (original_index, mut merged_index) = match command.flush_kind {
                 FlushKind::MergeUnloaded(position, dirty_index) => {
                     self.metrics
                         .unload
@@ -90,13 +90,17 @@ impl IndexFlusherThread {
                         .load_index(command.ks, position)
                         .expect("Failed to load index in flusher thread");
                     disk_index.merge_dirty(&dirty_index);
-                    (dirty_index, Arc::new(disk_index))
+                    (dirty_index, disk_index)
                 }
                 FlushKind::FlushLoaded(index) => {
                     self.metrics.unload.with_label_values(&["flush"]).inc();
-                    (index.clone(), index)
+                    // todo - no need to make copy if there is no compactor
+                    let index_copy = IndexTable::clone(&index);
+                    (index, index_copy)
                 }
             };
+            let ks = db.ks(command.ks);
+            self.run_compactor(ks, &mut merged_index);
             let position = db
                 .flush(command.ks, &merged_index)
                 .expect("Failed to flush index");
@@ -105,6 +109,20 @@ impl IndexFlusherThread {
                 .flush_time_mcs
                 .inc_by(now.elapsed().as_micros() as u64);
             self.metrics.flush_count.inc();
+        }
+    }
+
+    // todo - code duplicate with LargeTable::run_compactor
+    // todo - result of compactor is not applied to in-memory index for DirtyLoaded
+    fn run_compactor(&self, ks: &KeySpaceDesc, index: &mut IndexTable) {
+        if let Some(compactor) = ks.compactor() {
+            let pre_compact_len = index.len();
+            compactor(&mut index.data);
+            let compacted = pre_compact_len.saturating_sub(index.len());
+            self.metrics
+                .compacted_keys
+                .with_label_values(&[ks.name()])
+                .inc_by(compacted as u64);
         }
     }
 }
