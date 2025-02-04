@@ -753,6 +753,10 @@ impl LargeTableEntry {
         if !self.state.is_dirty() {
             return Ok(());
         }
+        if self.flush_pending {
+            // todo metric / log?
+            return Ok(());
+        }
         let position = self.state.wal_position();
         // position can actually be great then tail_position due to concurrency
         let distance = tail_position.saturating_sub(position.as_u64());
