@@ -886,7 +886,6 @@ impl LargeTableEntry {
     }
 
     fn run_compactor(&mut self) {
-        // todo run compactor during snapshot
         if let Some(compactor) = self.ks.compactor() {
             let index = self.data.make_mut();
             let pre_compact_len = index.len();

@@ -74,6 +74,7 @@ impl IndexFlusher {
 
 impl IndexFlusherThread {
     pub fn run(self) {
+        // todo run compactor with flusher
         while let Ok(command) = self.receiver.recv() {
             let now = Instant::now();
             let Some(db) = self.db.upgrade() else {
