@@ -3,6 +3,7 @@ pub mod config;
 mod control;
 mod crc;
 pub mod db;
+mod flusher;
 mod index_table;
 pub mod iterators;
 pub mod key_shape;

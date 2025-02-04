@@ -2,6 +2,7 @@ use crate::batch::WriteBatch;
 use crate::config::Config;
 use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
+use crate::flusher::IndexFlusher;
 use crate::index_table::IndexTable;
 use crate::iterators::range_ordered::RangeOrderedIterator;
 use crate::iterators::unordered::UnorderedIterator;
@@ -18,7 +19,7 @@ use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
 use std::{io, thread};
 
@@ -42,7 +43,7 @@ impl Db {
         key_shape: KeyShape,
         config: Arc<Config>,
         metrics: Arc<Metrics>,
-    ) -> DbResult<Self> {
+    ) -> DbResult<Arc<Self>> {
         let cr = OpenOptions::new()
             .read(true)
             .write(true)
@@ -50,25 +51,32 @@ impl Db {
             .open(path.join("cr"))?;
         let (control_region_store, control_region) =
             Self::read_or_create_control_region(&cr, &key_shape)?;
+        let (flusher_sender, flusher_receiver) = mpsc::channel();
+        let flusher = IndexFlusher::new(flusher_sender);
         let large_table = LargeTable::from_unloaded(
             &key_shape,
             control_region.snapshot(),
             config.clone(),
+            flusher,
             metrics.clone(),
         );
         let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let control_region_store = Mutex::new(control_region_store);
-        Ok(Self {
+        let this = Self {
             large_table,
             wal_writer,
             wal,
             control_region_store,
             config,
-            metrics,
+            metrics: metrics.clone(),
             key_shape,
-        })
+        };
+        let this = Arc::new(this);
+        // todo wait for jh on Db drop
+        let _jh = IndexFlusher::start_thread(flusher_receiver, Arc::downgrade(&this), metrics);
+        Ok(this)
     }
 
     pub(crate) fn wal_path(path: &Path) -> PathBuf {
@@ -375,6 +383,24 @@ impl Db {
         Ok(Some((next_cell, next_key, key, value)))
     }
 
+    pub(crate) fn update_flushed_index(
+        &self,
+        ks: KeySpace,
+        cell: usize,
+        original_index: Arc<IndexTable>,
+        position: WalPosition,
+    ) {
+        let ks = self.key_shape.ks(ks);
+        self.large_table
+            .update_flushed_index(ks, cell, original_index, position)
+    }
+
+    pub(crate) fn load_index(&self, ks: KeySpace, position: WalPosition) -> DbResult<IndexTable> {
+        let ks = self.key_shape.ks(ks);
+        let entry = self.read_report_entry(position)?;
+        Self::read_index(ks, entry)
+    }
+
     fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
         let entry = self.read_report_entry(position)?;
         if let WalEntry::Record(KeySpace(_), wal_key, v) = entry {
@@ -535,11 +561,11 @@ impl Loader for Wal {
         Ok(self.random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
-    fn unload_supported(&self) -> bool {
+    fn flush_supported(&self) -> bool {
         false
     }
 
-    fn unload(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
+    fn flush(&self, _ks: KeySpace, _data: &IndexTable) -> DbResult<WalPosition> {
         unimplemented!()
     }
 }
@@ -558,11 +584,11 @@ impl Loader for Db {
             .random_reader_at(position, WalEntry::INDEX_PREFIX_SIZE)?)
     }
 
-    fn unload_supported(&self) -> bool {
+    fn flush_supported(&self) -> bool {
         true
     }
 
-    fn unload(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
+    fn flush(&self, ks: KeySpace, data: &IndexTable) -> DbResult<WalPosition> {
         self.write_index(ks, data)
     }
 }
@@ -752,7 +778,6 @@ mod test {
         let config = Arc::new(config);
         let (key_shape, ks) = KeyShape::new_single(8, 12, 12);
         let db = Db::open(dir.path(), key_shape, config, Metrics::new()).unwrap();
-        let db = Arc::new(db);
         let threads = 8u64;
         let mut jhs = Vec::with_capacity(threads as usize);
         let iterations = 256u64;
@@ -1251,10 +1276,12 @@ mod test {
             db.insert(ks, vec![1, 2, 3, 4, 6], vec![6]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 7], vec![7]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 8], vec![8]).unwrap();
+            thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
             check_metrics(&db.metrics, 0, 1, 0, 0);
             db.insert(ks, vec![1, 2, 3, 4, 9], vec![9]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 10], vec![10]).unwrap();
             check_all(&db, ks, 10);
+            thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
             check_metrics(&db.metrics, 0, 1, 1, 0);
         }
         {

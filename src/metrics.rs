@@ -33,6 +33,10 @@ pub struct Metrics {
     pub snapshot_force_unload: IntCounterVec,
     pub snapshot_written_bytes: IntCounter,
     pub rebuild_control_region_time_mcs: Histogram,
+
+    pub flush_time_mcs: IntCounter,
+    pub flush_count: IntCounter,
+    pub flush_update: IntCounterVec,
 }
 
 #[macro_export]
@@ -116,6 +120,10 @@ impl Metrics {
                 rebuild_buckets,
                 registry
             ),
+
+            flush_time_mcs: counter!("flush_time_mcs", registry),
+            flush_count: counter!("flush_count", registry),
+            flush_update: counter_vec!("flush_update", &["kind"], registry),
             // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
         };
         Arc::new(this)

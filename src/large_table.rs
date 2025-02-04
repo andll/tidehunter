@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::flusher::{FlushKind, IndexFlusher};
 use crate::index_table::IndexTable;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::metrics::Metrics;
@@ -19,6 +20,7 @@ use std::{cmp, mem};
 pub struct LargeTable {
     table: Vec<KsTable>,
     config: Arc<Config>,
+    flusher: IndexFlusher,
     metrics: Arc<Metrics>,
 }
 
@@ -27,12 +29,14 @@ pub struct Version(pub u64);
 
 pub struct LargeTableEntry {
     ks: KeySpaceDesc,
+    cell: usize,
     data: ArcCow<IndexTable>,
     last_added_position: Option<WalPosition>,
     state: LargeTableEntryState,
     metrics: Arc<Metrics>,
     bloom_filter: Option<BloomFilter>,
     unload_jitter: usize,
+    flush_pending: bool,
 }
 
 enum LargeTableEntryState {
@@ -66,6 +70,7 @@ impl LargeTable {
         key_shape: &KeyShape,
         snapshot: &LargeTableContainer<WalPosition>,
         config: Arc<Config>,
+        flusher: IndexFlusher,
         metrics: Arc<Metrics>,
     ) -> Self {
         assert_eq!(
@@ -86,22 +91,28 @@ impl LargeTable {
                         ks.num_mutexes()
                     );
                 }
-                let rows = ks_snapshot.iter().map(|row_snapshot| {
-                    let data = row_snapshot
-                        .iter()
-                        .map(|position| {
-                            let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
-                            LargeTableEntry::from_snapshot_position(
-                                ks.clone(),
-                                position,
-                                metrics.clone(),
-                                unload_jitter,
-                            )
-                        })
-                        .collect();
-                    let value_lru = ks.value_cache_size().map(LruCache::new);
-                    Row { data, value_lru }
-                });
+                let rows = ks_snapshot
+                    .iter()
+                    .enumerate()
+                    .map(|(row_index, row_snapshot)| {
+                        let data = row_snapshot
+                            .iter()
+                            .enumerate()
+                            .map(|(row_offset, position)| {
+                                let cell = ks.cell_by_location(row_index, row_offset);
+                                let unload_jitter = config.gen_dirty_keys_jitter(&mut rng);
+                                LargeTableEntry::from_snapshot_position(
+                                    ks.clone(),
+                                    cell,
+                                    position,
+                                    metrics.clone(),
+                                    unload_jitter,
+                                )
+                            })
+                            .collect();
+                        let value_lru = ks.value_cache_size().map(LruCache::new);
+                        Row { data, value_lru }
+                    });
                 let rows = ShardedMutex::from_iterator(rows);
                 KsTable {
                     ks: ks.clone(),
@@ -112,6 +123,7 @@ impl LargeTable {
         Self {
             table,
             config,
+            flusher,
             metrics,
         }
     }
@@ -131,8 +143,8 @@ impl LargeTable {
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
         let index_size = entry.data.len();
-        if loader.unload_supported() && self.too_many_dirty(entry) {
-            entry.unload_if_ks_enabled(loader, &self.config)?;
+        if loader.flush_supported() && self.too_many_dirty(entry) {
+            entry.unload_if_ks_enabled(&self.flusher);
         }
         self.metrics
             .max_index_size
@@ -292,7 +304,7 @@ impl LargeTable {
         tail_position: u64,
         loader: &L,
     ) -> Result<LargeTableSnapshot, L::Error> {
-        assert!(loader.unload_supported());
+        assert!(loader.flush_supported());
         // See ks_snapshot documentation for details
         // on how snapshot replay position is determined.
         let mut replay_from = None;
@@ -506,6 +518,26 @@ impl LargeTable {
         }
     }
 
+    pub fn update_flushed_index(
+        &self,
+        ks: &KeySpaceDesc,
+        cell: usize,
+        original_index: Arc<IndexTable>,
+        position: WalPosition,
+    ) {
+        let (row, offset) = ks.locate_cell(cell);
+        let ks_table = self.ks_table(ks);
+        let mut row = ks_table.lock(
+            row,
+            &self
+                .metrics
+                .large_table_contention
+                .with_label_values(&[ks.name()]),
+        );
+        let entry = row.entry_mut(offset);
+        entry.update_flushed_index(original_index, position);
+    }
+
     #[cfg(test)]
     pub(crate) fn is_all_clean(&self) -> bool {
         for ks_table in &self.table {
@@ -535,32 +567,46 @@ pub trait Loader {
 
     fn index_reader(&self, position: WalPosition) -> Result<WalRandomRead, Self::Error>;
 
-    fn unload_supported(&self) -> bool;
+    fn flush_supported(&self) -> bool;
 
-    fn unload(&self, ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error>;
+    fn flush(&self, ks: KeySpace, data: &IndexTable) -> Result<WalPosition, Self::Error>;
 }
 
 impl LargeTableEntry {
     pub fn new_unloaded(
         ks: KeySpaceDesc,
+        cell: usize,
         position: WalPosition,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
     ) -> Self {
         Self::new_with_state(
             ks,
+            cell,
             LargeTableEntryState::Unloaded(position),
             metrics,
             unload_jitter,
         )
     }
 
-    pub fn new_empty(ks: KeySpaceDesc, metrics: Arc<Metrics>, unload_jitter: usize) -> Self {
-        Self::new_with_state(ks, LargeTableEntryState::Empty, metrics, unload_jitter)
+    pub fn new_empty(
+        ks: KeySpaceDesc,
+        cell: usize,
+        metrics: Arc<Metrics>,
+        unload_jitter: usize,
+    ) -> Self {
+        Self::new_with_state(
+            ks,
+            cell,
+            LargeTableEntryState::Empty,
+            metrics,
+            unload_jitter,
+        )
     }
 
     fn new_with_state(
         ks: KeySpaceDesc,
+        cell: usize,
         state: LargeTableEntryState,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
@@ -570,25 +616,28 @@ impl LargeTableEntry {
             .map(|params| BloomFilter::with_rate(params.rate, params.count));
         Self {
             ks,
+            cell,
             state,
             data: Default::default(),
             last_added_position: Default::default(),
             metrics,
             bloom_filter,
             unload_jitter,
+            flush_pending: false,
         }
     }
 
     pub fn from_snapshot_position(
         ks: KeySpaceDesc,
+        cell: usize,
         position: &WalPosition,
         metrics: Arc<Metrics>,
         unload_jitter: usize,
     ) -> Self {
         if position == &WalPosition::INVALID {
-            LargeTableEntry::new_empty(ks, metrics, unload_jitter)
+            LargeTableEntry::new_empty(ks, cell, metrics, unload_jitter)
         } else {
-            LargeTableEntry::new_unloaded(ks, *position, metrics, unload_jitter)
+            LargeTableEntry::new_unloaded(ks, cell, *position, metrics, unload_jitter)
         }
     }
 
@@ -719,15 +768,51 @@ impl LargeTableEntry {
         Ok(())
     }
 
-    pub fn unload_if_ks_enabled<L: Loader>(
-        &mut self,
-        loader: &L,
-        config: &Config,
-    ) -> Result<(), L::Error> {
+    pub fn unload_if_ks_enabled(&mut self, flusher: &IndexFlusher) {
         if self.ks.unloading_disabled() {
-            return Ok(());
+            return;
         }
-        self.unload(loader, config, false)
+        if !self.flush_pending {
+            self.flush_pending = true;
+            let flush_kind = self
+                .flush_kind()
+                .expect("unload_if_ks_enabled is called in clean state");
+            flusher.request_flush(self.ks.id(), self.cell, flush_kind);
+        }
+    }
+
+    pub fn update_flushed_index(&mut self, original_index: Arc<IndexTable>, position: WalPosition) {
+        assert!(
+            self.flush_pending,
+            "update_merged_index called while flush_pending is not set"
+        );
+        match self.state {
+            LargeTableEntryState::DirtyUnloaded(_, _) => {}
+            LargeTableEntryState::DirtyLoaded(_, _) => {}
+            LargeTableEntryState::Empty => panic!("update_merged_index in Empty state"),
+            LargeTableEntryState::Unloaded(_) => panic!("update_merged_index in Unloaded state"),
+            LargeTableEntryState::Loaded(_) => panic!("update_merged_index in Loaded state"),
+        }
+        self.flush_pending = false;
+        if self.data.same_shared(&original_index) {
+            self.report_loaded_keys_delta(-(self.data.len() as i64));
+            self.data = Default::default();
+            self.state = LargeTableEntryState::Unloaded(position);
+            self.metrics
+                .flush_update
+                .with_label_values(&["clear"])
+                .inc();
+        } else {
+            let delta = self.data.make_mut().unmerge_flushed(&original_index);
+            self.report_loaded_keys_delta(delta);
+            // todo remove dirty_keys from DirtyUnloaded
+            let dirty_keys = self.data.data.keys().cloned().collect();
+            self.state = LargeTableEntryState::DirtyUnloaded(position, dirty_keys);
+            self.metrics
+                .flush_update
+                .with_label_values(&["unmerge"])
+                .inc();
+        }
     }
 
     fn unload<L: Loader>(
@@ -789,7 +874,7 @@ impl LargeTableEntry {
 
     fn unload_dirty_loaded<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {
         self.run_compactor();
-        let position = loader.unload(self.ks.id(), &self.data)?;
+        let position = loader.flush(self.ks.id(), &self.data)?;
         self.state = LargeTableEntryState::Unloaded(position);
         self.report_loaded_keys_delta(-(self.data.len() as i64));
         self.data = Default::default();
@@ -813,6 +898,20 @@ impl LargeTableEntry {
 
     pub fn is_empty(&self) -> bool {
         matches!(self.state, LargeTableEntryState::Empty)
+    }
+
+    pub fn flush_kind(&mut self) -> Option<FlushKind> {
+        match self.state {
+            LargeTableEntryState::Empty => None,
+            LargeTableEntryState::Unloaded(_) => None,
+            LargeTableEntryState::Loaded(_) => None,
+            LargeTableEntryState::DirtyUnloaded(position, _) => {
+                Some(FlushKind::MergeUnloaded(position, self.data.clone_shared()))
+            }
+            LargeTableEntryState::DirtyLoaded(_, _) => {
+                Some(FlushKind::FlushLoaded(self.data.clone_shared()))
+            }
+        }
     }
 }
 
@@ -988,6 +1087,7 @@ mod tests {
             &ks,
             &LargeTableContainer::new_from_key_shape(&ks, WalPosition::INVALID),
             Arc::new(config),
+            IndexFlusher::new_unstarted_for_test(),
             Metrics::new(),
         );
         let (mut row, offset) = l.row(ks.ks(a), &[]);

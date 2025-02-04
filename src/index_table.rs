@@ -39,6 +39,22 @@ impl IndexTable {
         }
     }
 
+    /// Remove flushed index entries, returning number of entries changed
+    pub fn unmerge_flushed(&mut self, original: &Self) -> i64 {
+        let mut delta = 0i64;
+        for (k, v) in original.data.iter() {
+            let prev = self.data.get(k);
+            let Some(prev) = prev else {
+                panic!("Original entry not found during unmerge_flushed")
+            };
+            if prev == v {
+                self.data.remove(k);
+                delta -= 1;
+            }
+        }
+        delta
+    }
+
     /// Change loaded dirty IndexTable into unloaded dirty by retaining dirty keys and tombstones
     /// Returns delta in number of entries
     pub fn make_dirty(&mut self, mut dirty_keys: HashSet<Bytes>) -> i64 {
@@ -311,6 +327,26 @@ mod tests {
             let value = IndexTable::lookup_unloaded(ks, &bytes, &k(key));
             assert!(value.is_none());
         }
+    }
+
+    #[test]
+    pub fn test_unmerge_flushed() {
+        let mut index = IndexTable::default();
+        index.insert(vec![1].into(), WalPosition::test_value(2));
+        index.insert(vec![2].into(), WalPosition::test_value(3));
+        index.insert(vec![6].into(), WalPosition::test_value(4));
+        let mut index2 = index.clone();
+        index2.insert(vec![1].into(), WalPosition::test_value(5));
+        index2.insert(vec![3].into(), WalPosition::test_value(8));
+        assert_eq!(index2.unmerge_flushed(&index), -2);
+        let data = index2.data.into_iter().collect::<Vec<_>>();
+        assert_eq!(
+            data,
+            vec![
+                (vec![1].into(), WalPosition::test_value(5)),
+                (vec![3].into(), WalPosition::test_value(8))
+            ]
+        );
     }
 
     fn k(k: u128) -> Bytes {

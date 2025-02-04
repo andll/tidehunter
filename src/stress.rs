@@ -74,7 +74,6 @@ pub fn main() {
     crate::prometheus::start_prometheus_server("127.0.0.1:9092".parse().unwrap(), &registry);
     let (key_shape, ks) = KeyShape::new_single(32, 1024, 32);
     let db = Db::open(dir.path(), key_shape, config, metrics.clone()).unwrap();
-    let db = Arc::new(db);
     if !args.no_snapshot {
         report!(report, "Periodic snapshot **enabled**");
         db.start_periodic_snapshot();

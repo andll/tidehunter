@@ -138,6 +138,11 @@ impl KeySpaceDesc {
         (mutex, offset)
     }
 
+    // Reverse of locate_cell
+    pub(crate) fn cell_by_location(&self, row: usize, offset: usize) -> usize {
+        offset * self.num_mutexes() + row
+    }
+
     pub fn num_mutexes(&self) -> usize {
         self.mutexes
     }
@@ -307,5 +312,27 @@ impl KeyShape {
 impl KeySpace {
     pub(crate) fn as_usize(&self) -> usize {
         self.0 as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cell_by_location() {
+        let ks = KeySpaceDesc {
+            id: KeySpace(0),
+            name: "".to_string(),
+            key_size: 0,
+            mutexes: 128,
+            per_mutex: 512,
+            config: Default::default(),
+        };
+        for cell in 0..1024usize {
+            let (row, offset) = ks.locate_cell(cell);
+            let evaluated_cell = ks.cell_by_location(row, offset);
+            assert_eq!(evaluated_cell, cell);
+        }
     }
 }
