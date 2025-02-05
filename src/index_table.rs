@@ -44,6 +44,7 @@ impl IndexTable {
         let mut delta = 0i64;
         for (k, v) in original.data.iter() {
             let prev = self.data.get(k);
+            // todo clarify None here
             if prev == Some(v) {
                 self.data.remove(k);
                 delta -= 1;
