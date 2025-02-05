@@ -1367,6 +1367,46 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_value_cache_update_remove() {
+        let dir = tempdir::TempDir::new("test-value-cache-update-remove").unwrap();
+        let config = Arc::new(Config::small());
+        let mut ksb = KeyShapeBuilder::new();
+        let ksc = KeySpaceConfig::new().with_value_cache_size(10);
+        let ks = ksb.add_key_space_config("k", 1, 1, 1, ksc);
+        let key_shape = ksb.build();
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+        db.insert(ks, vec![1], vec![2]).unwrap();
+        db.insert(ks, vec![2], vec![3]).unwrap();
+        assert_eq!(&db.get(ks, &[1]).unwrap().unwrap(), &[2]);
+        assert_eq!(&db.get(ks, &[2]).unwrap().unwrap(), &[3]);
+        assert_eq!(
+            2,
+            metrics
+                .lookup_result
+                .with_label_values(&["k", "found", "lru"])
+                .get()
+        );
+        db.insert(ks, vec![1], vec![4]).unwrap();
+        assert_eq!(&db.get(ks, &[1]).unwrap().unwrap(), &[4]);
+        db.remove(ks, vec![1]).unwrap();
+        assert_eq!(db.get(ks, &[1]).unwrap(), None);
+        assert_eq!(
+            3,
+            metrics
+                .lookup_result
+                .with_label_values(&["k", "found", "lru"])
+                .get()
+        );
+    }
+
     fn force_unload_config(config: &Config) -> Arc<Config> {
         let mut config2 = Config::clone(config);
         config2.snapshot_unload_threshold = 0;

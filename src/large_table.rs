@@ -182,7 +182,6 @@ impl LargeTable {
     }
 
     pub fn update_lru(&self, ks: &KeySpaceDesc, key: Bytes, value: Bytes) {
-        // todo update lru on remove / insert
         if ks.value_cache_size().is_none() {
             return;
         }
