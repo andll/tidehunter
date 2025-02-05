@@ -182,6 +182,7 @@ impl LargeTable {
     }
 
     pub fn update_lru(&self, ks: &KeySpaceDesc, key: Bytes, value: Bytes) {
+        // todo update lru on remove / insert
         if ks.value_cache_size().is_none() {
             return;
         }
@@ -189,7 +190,15 @@ impl LargeTable {
         let Some(value_lru) = &mut row.value_lru else {
             unreachable!()
         };
-        value_lru.push(key, value);
+        let mut delta: i64 = (key.len() + value.len()) as i64;
+        let previous = value_lru.push(key, value);
+        if let Some((p_key, p_value)) = previous {
+            delta -= (p_key.len() + p_value.len()) as i64;
+        }
+        self.metrics
+            .value_cache_size
+            .with_label_values(&[&ks.name()])
+            .add(delta);
     }
 
     pub fn get<L: Loader>(

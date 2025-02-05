@@ -39,6 +39,7 @@ pub struct Metrics {
     pub flush_update: IntCounterVec,
 
     pub memory_estimate: IntGaugeVec,
+    pub value_cache_size: IntGaugeVec,
 }
 
 #[macro_export]
@@ -128,6 +129,7 @@ impl Metrics {
             flush_update: counter_vec!("flush_update", &["kind"], registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
+            value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),
         };
         Arc::new(this)
     }
