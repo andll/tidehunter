@@ -578,6 +578,7 @@ impl PreparedWalWrite {
 
 impl WalPosition {
     pub const MAX: WalPosition = WalPosition(u64::MAX);
+    pub const SIZE: usize = 8;
     pub const INVALID: WalPosition = Self::MAX;
     pub const LENGTH: usize = 8;
     #[cfg(test)]

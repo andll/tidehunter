@@ -12,6 +12,7 @@ use crate::metrics::{Metrics, TimerExt};
 use crate::wal::{
     PreparedWalWrite, Wal, WalError, WalIterator, WalPosition, WalRandomRead, WalWriter,
 };
+use bloom::needed_bits;
 use bytes::{Buf, BufMut, BytesMut};
 use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
@@ -73,6 +74,7 @@ impl Db {
             metrics: metrics.clone(),
             key_shape,
         };
+        this.report_memory_estimates();
         let this = Arc::new(this);
         // todo wait for jh on Db drop
         let _jh = IndexFlusher::start_thread(flusher_receiver, Arc::downgrade(&this), metrics);
@@ -514,6 +516,30 @@ impl Db {
         } else {
             panic!("Unexpected wal entry where expected record");
         }
+    }
+
+    fn report_memory_estimates(&self) {
+        for ks in self.key_shape.iter_ks() {
+            let cache_estimate =
+                (ks.key_size() + WalPosition::SIZE) * ks.num_cells() * self.config.max_dirty_keys;
+            self.metrics
+                .memory_estimate
+                .with_label_values(&[ks.name(), "index_cache"])
+                .set(cache_estimate as i64);
+            if let Some(bloom_filter) = ks.bloom_filter() {
+                let bloom_size = needed_bits(bloom_filter.rate, bloom_filter.count) / 8;
+                let bloom_estimate = bloom_size * ks.num_mutexes();
+                self.metrics
+                    .memory_estimate
+                    .with_label_values(&[ks.name(), "bloom"])
+                    .set(bloom_estimate as i64);
+            }
+        }
+        let maps_estimate = (self.config.max_maps as u64) * self.config.frag_size;
+        self.metrics
+            .memory_estimate
+            .with_label_values(&["_", "maps"])
+            .set(maps_estimate as i64);
     }
 }
 

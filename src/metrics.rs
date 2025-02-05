@@ -37,6 +37,8 @@ pub struct Metrics {
     pub flush_time_mcs: IntCounter,
     pub flush_count: IntCounter,
     pub flush_update: IntCounterVec,
+
+    pub memory_estimate: IntGaugeVec,
 }
 
 #[macro_export]
@@ -124,7 +126,8 @@ impl Metrics {
             flush_time_mcs: counter!("flush_time_mcs", registry),
             flush_count: counter!("flush_count", registry),
             flush_update: counter_vec!("flush_update", &["kind"], registry),
-            // loaded_keys_total_bytes: gauge!("loaded_keys_total_bytes", registry),
+
+            memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
         };
         Arc::new(this)
     }
