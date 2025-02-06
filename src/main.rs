@@ -16,7 +16,9 @@ mod primitives;
 mod prometheus;
 #[cfg(feature = "stress")]
 mod stress;
+
 mod wal;
+mod wal_syncer;
 
 fn main() {
     // random_access_speed_test::random_access_speed_test().unwrap();

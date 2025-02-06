@@ -26,6 +26,7 @@ pub struct Metrics {
 
     pub large_table_contention: HistogramVec,
     pub wal_contention: Histogram,
+    pub wal_synced_position: IntGauge,
     pub db_op_mcs: HistogramVec,
     pub map_time_mcs: Histogram,
 
@@ -108,6 +109,7 @@ impl Metrics {
                 registry
             ),
             wal_contention: histogram!("wal_contention", lock_buckets.clone(), registry),
+            wal_synced_position: gauge!("wal_synced_position", registry),
             db_op_mcs: histogram_vec!("db_op", &["op", "ks"], db_op_buckets, registry),
             map_time_mcs: histogram!("map_time_mcs", lookup_buckets.clone(), registry),
 

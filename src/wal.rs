@@ -1,8 +1,8 @@
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::lookup::{FileRange, RandomRead};
 use crate::metrics::{Metrics, TimerExt};
+use crate::wal_syncer::WalSyncer;
 use bytes::{Buf, BufMut, BytesMut};
-use memmap2::MmapMut;
 use minibytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub struct Wal {
     file: File,
     layout: WalLayout,
     maps: RwLock<BTreeMap<u64, Map>>,
+    wal_syncer: WalSyncer,
     metrics: Arc<Metrics>,
 }
 
@@ -49,9 +50,10 @@ pub struct WalIterator {
 }
 
 #[derive(Clone)]
-struct Map {
+// todo only pub between wal.rs and wal_syncer.rs
+pub(crate) struct Map {
     id: u64,
-    data: Bytes,
+    pub data: Bytes,
     writeable: bool,
 }
 
@@ -67,37 +69,37 @@ impl WalWriter {
     pub fn write(&self, w: &PreparedWalWrite) -> Result<WalPosition, WalError> {
         let len = w.frame.len_with_header() as u64;
         let len_aligned = align(len);
-        let mut position_map = self.position_and_map.lock();
-        let (pos, prev_block_end) = position_map.0.allocate_position(len_aligned);
+        let mut current_map_and_position = self.position_and_map.lock();
+        let (pos, prev_block_end) = current_map_and_position.0.allocate_position(len_aligned);
         // todo duplicated code
         let (map_id, offset) = self.wal.layout.locate(pos);
         // todo - decide whether map is covered by mutex or we want concurrent writes
-        if position_map.1.id != map_id {
+        if current_map_and_position.1.id != map_id {
             if pos != prev_block_end {
                 let (prev_map, prev_offset) = self.wal.layout.locate(prev_block_end);
-                assert_eq!(prev_map, position_map.1.id);
+                assert_eq!(prev_map, current_map_and_position.1.id);
                 let skip_marker = CrcFrame::skip_marker();
-                let buf = position_map
+                let buf = current_map_and_position
                     .1
                     .write_buf_at(prev_offset as usize, skip_marker.as_ref().len());
                 buf.copy_from_slice(skip_marker.as_ref());
             }
-            let mmap_mut = position_map
-                .1
-                .data
-                .downcast_ref::<MmapMut>()
-                .expect("Can't downcast writable map to MmapMut");
-            // Asynchronously flush the filled mem map
-            // todo evaluate to make sure this does not hurt performance in real app
-            mmap_mut.flush_async()?;
-            position_map.1 = self.wal.recv_map(&self.mapper, map_id, &position_map.1);
+            let mut offloaded_map =
+                self.wal
+                    .recv_map(&self.mapper, map_id, &current_map_and_position.1);
+            mem::swap(&mut offloaded_map, &mut current_map_and_position.1);
+            self.wal
+                .wal_syncer
+                .send(offloaded_map, self.wal.layout.map_range(map_id).end);
         } else {
             // todo it is possible to have a race between map mutex and pos allocation so this check may fail
             // assert_eq!(pos, align(prev_block_end));
         }
         // safety: pos calculation logic guarantees non-overlapping writes
         // position only available after write here completes
-        let buf = position_map.1.write_buf_at(offset as usize, len as usize);
+        let buf = current_map_and_position
+            .1
+            .write_buf_at(offset as usize, len as usize);
         buf.copy_from_slice(w.frame.as_ref());
         // conversion to u32 is safe - pos is less than self.frag_size,
         // and self.frag_size is asserted less than u32::MAX
@@ -199,10 +201,12 @@ impl Wal {
     }
 
     fn from_file(file: File, layout: WalLayout, metrics: Arc<Metrics>) -> Arc<Self> {
+        let wal_syncer = WalSyncer::start(metrics.clone());
         let reader = Wal {
             file,
             layout,
             maps: Default::default(),
+            wal_syncer,
             metrics,
         };
         Arc::new(reader)
