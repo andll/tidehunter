@@ -138,7 +138,9 @@ impl LargeTable {
     ) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
-            value_lru.push(k.clone(), value.clone());
+            let delta: i64 = (k.len() + value.len()) as i64;
+            let previous = value_lru.push(k.clone(), value.clone());
+            self.update_lru_metric(ks, previous, delta);
         }
         let entry = row.entry_mut(offset);
         entry.insert(k, v);
@@ -174,7 +176,8 @@ impl LargeTable {
     ) -> Result<(), L::Error> {
         let (mut row, offset) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
-            value_lru.pop(&k);
+            let previous = value_lru.pop(&k);
+            self.update_lru_metric(ks, previous.map(|v|(k.clone(), v)), 0);
         }
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
@@ -189,8 +192,12 @@ impl LargeTable {
         let Some(value_lru) = &mut row.value_lru else {
             unreachable!()
         };
-        let mut delta: i64 = (key.len() + value.len()) as i64;
+        let delta: i64 = (key.len() + value.len()) as i64;
         let previous = value_lru.push(key, value);
+        self.update_lru_metric(ks, previous, delta);
+    }
+
+    fn update_lru_metric(&self, ks: &KeySpaceDesc, previous: Option<(Bytes, Bytes)>, mut delta: i64) {
         if let Some((p_key, p_value)) = previous {
             delta -= (p_key.len() + p_value.len()) as i64;
         }
