@@ -528,7 +528,7 @@ impl Db {
                 .set(cache_estimate as i64);
             if let Some(bloom_filter) = ks.bloom_filter() {
                 let bloom_size = needed_bits(bloom_filter.rate, bloom_filter.count) / 8;
-                let bloom_estimate = bloom_size * ks.num_mutexes();
+                let bloom_estimate = bloom_size * ks.num_cells();
                 self.metrics
                     .memory_estimate
                     .with_label_values(&[ks.name(), "bloom"])
