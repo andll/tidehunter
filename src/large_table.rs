@@ -177,7 +177,7 @@ impl LargeTable {
         let (mut row, offset) = self.row(ks, &k);
         if let Some(value_lru) = &mut row.value_lru {
             let previous = value_lru.pop(&k);
-            self.update_lru_metric(ks, previous.map(|v|(k.clone(), v)), 0);
+            self.update_lru_metric(ks, previous.map(|v| (k.clone(), v)), 0);
         }
         let entry = row.entry_mut(offset);
         entry.remove(k, v);
@@ -197,7 +197,12 @@ impl LargeTable {
         self.update_lru_metric(ks, previous, delta);
     }
 
-    fn update_lru_metric(&self, ks: &KeySpaceDesc, previous: Option<(Bytes, Bytes)>, mut delta: i64) {
+    fn update_lru_metric(
+        &self,
+        ks: &KeySpaceDesc,
+        previous: Option<(Bytes, Bytes)>,
+        mut delta: i64,
+    ) {
         if let Some((p_key, p_value)) = previous {
             delta -= (p_key.len() + p_value.len()) as i64;
         }
