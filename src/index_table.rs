@@ -4,6 +4,7 @@ use crate::math::rescale_u32;
 use crate::wal::WalPosition;
 use bytes::{Buf, BufMut, BytesMut};
 use minibytes::Bytes;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::RangeInclusive;
 
@@ -20,7 +21,23 @@ const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 
 impl IndexTable {
     pub fn insert(&mut self, k: Bytes, v: WalPosition) -> Option<WalPosition> {
-        self.data.insert(k, v)
+        // Only update index entry if new entry has higher wal position then the previous entry
+        // See test_concurrent_single_value_update for details how this is tested
+        // todo handle this comparison correctly when we have data relocation
+        // todo might want a separate test with snapshot enabled
+        match self.data.entry(k) {
+            Entry::Vacant(va) => {
+                va.insert(v);
+                None
+            }
+            Entry::Occupied(mut oc) => {
+                let previous = *oc.get();
+                if previous < v {
+                    oc.insert(v);
+                }
+                Some(previous)
+            }
+        }
     }
 
     pub fn remove(&mut self, k: &[u8]) -> Option<WalPosition> {

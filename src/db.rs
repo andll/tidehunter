@@ -722,6 +722,8 @@ impl From<bincode::Error> for DbError {
 mod test {
     use super::*;
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
+    use rand::rngs::ThreadRng;
+    use rand::Rng;
     use std::collections::HashSet;
 
     #[test]
@@ -1405,6 +1407,84 @@ mod test {
                 .with_label_values(&["k", "found", "lru"])
                 .get()
         );
+    }
+
+    // This test is disabled as it takes a long time, but it should be run if logic around
+    // IndexTable::insert is changed.
+    // todo we can also rewrite this test more efficiently if we introduce
+    // random sleep between wal write and large_table insert during the test.
+    #[ignore]
+    #[test]
+    // This test verifies that the last value written into the large table
+    // cache matches the last value written to wal.
+    // Because wal write and write into large table are not done under single mutex,
+    // there can be race condition unless special measures are taken.
+    fn test_concurrent_single_value_update() {
+        let num_threads = 8;
+        let mut threads = Vec::with_capacity(num_threads);
+        for i in 0..num_threads {
+            let jh = thread::spawn(move || {
+                for _ in 0..256 {
+                    test_concurrent_single_value_update_iteration(i)
+                }
+            });
+            threads.push(jh);
+        }
+        for jh in threads {
+            jh.join().unwrap();
+        }
+    }
+
+    fn test_concurrent_single_value_update_iteration(i: usize) {
+        let dir =
+            tempdir::TempDir::new(&format!("test-concurrent-single-value-update-{i}")).unwrap();
+        let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_single(4, 1, 1);
+        let cached_value;
+        let key = Bytes::from(15u32.to_be_bytes().to_vec());
+        {
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            let num_threads = 16;
+            let mut threads = Vec::with_capacity(num_threads);
+            for _ in 0..num_threads {
+                let db = db.clone();
+                let jh = thread::spawn(move || {
+                    let mut rng = ThreadRng::default();
+                    for _ in 0..1024 {
+                        let key = Bytes::from(15u32.to_be_bytes().to_vec());
+                        let value: u32 = rng.gen();
+                        db.insert(ks, key.clone(), value.to_be_bytes().to_vec())
+                            .unwrap();
+                    }
+                });
+                threads.push(jh);
+            }
+            for jh in threads {
+                jh.join().unwrap();
+            }
+            cached_value = db.get(ks, &key).unwrap().unwrap();
+        }
+        {
+            let db = Arc::new(
+                Db::open(
+                    dir.path(),
+                    key_shape.clone(),
+                    config.clone(),
+                    Metrics::new(),
+                )
+                .unwrap(),
+            );
+            let replay_value = db.get(ks, &key).unwrap().unwrap();
+            assert_eq!(replay_value, cached_value);
+        }
     }
 
     fn force_unload_config(config: &Config) -> Arc<Config> {
