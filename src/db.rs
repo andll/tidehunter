@@ -489,7 +489,20 @@ impl Db {
     }
 
     fn write_index(&self, ks: KeySpace, index: &IndexTable) -> DbResult<WalPosition> {
-        let index = index.to_bytes(self.key_shape.ks(ks));
+        let ksd = self.key_shape.ks(ks);
+        self.metrics
+            .flush_count
+            .with_label_values(&[ksd.name()])
+            .inc();
+        self.metrics
+            .flushed_keys
+            .with_label_values(&[ksd.name()])
+            .inc_by(index.len() as u64);
+        let index = index.to_bytes(ksd);
+        self.metrics
+            .flushed_bytes
+            .with_label_values(&[ksd.name()])
+            .inc_by(index.len() as u64);
         let w = PreparedWalWrite::new(&WalEntry::Index(ks, index));
         self.metrics
             .wal_written_bytes_type

@@ -36,8 +36,10 @@ pub struct Metrics {
     pub rebuild_control_region_time_mcs: Histogram,
 
     pub flush_time_mcs: IntCounter,
-    pub flush_count: IntCounter,
+    pub flush_count: IntCounterVec,
     pub flush_update: IntCounterVec,
+    pub flushed_keys: IntCounterVec,
+    pub flushed_bytes: IntCounterVec,
 
     pub memory_estimate: IntGaugeVec,
     pub value_cache_size: IntGaugeVec,
@@ -127,8 +129,10 @@ impl Metrics {
             ),
 
             flush_time_mcs: counter!("flush_time_mcs", registry),
-            flush_count: counter!("flush_count", registry),
+            flush_count: counter_vec!("flush_count", &["ks"], registry),
             flush_update: counter_vec!("flush_update", &["kind"], registry),
+            flushed_keys: counter_vec!("flushed_keys", &["ks"], registry),
+            flushed_bytes: counter_vec!("flushed_bytes", &["ks"], registry),
 
             memory_estimate: gauge_vec!("memory_estimate", &["ks", "kind"], registry),
             value_cache_size: gauge_vec!("value_cache_size", &["ks"], registry),

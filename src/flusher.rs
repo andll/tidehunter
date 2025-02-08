@@ -108,7 +108,6 @@ impl IndexFlusherThread {
             self.metrics
                 .flush_time_mcs
                 .inc_by(now.elapsed().as_micros() as u64);
-            self.metrics.flush_count.inc();
         }
     }
 
