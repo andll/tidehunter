@@ -108,8 +108,17 @@ impl KeyShapeBuilder {
     }
 
     pub fn build(self) -> KeyShape {
+        self.self_check();
         KeyShape {
             key_spaces: self.key_spaces,
+        }
+    }
+
+    fn self_check(&self) {
+        for ks in &self.key_spaces {
+            if ks.config.bloom_filter.is_some() && ks.config.compactor.is_some() {
+                panic!("Tidehunter currently does not support key space with both compactor and bloom filter enabled");
+            }
         }
     }
 }
