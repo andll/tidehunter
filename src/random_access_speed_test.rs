@@ -43,8 +43,13 @@ pub(crate) fn random_access_speed_test() {
     for _ in 0..4 {
         test_buf(file.clone(), 1024, len);
         test_buf(file.clone(), 4 * 1024, len);
+        test_buf(file.clone(), 16 * 1024, len);
         test_buf(file.clone(), 32 * 1024, len);
         test_buf(file.clone(), 64 * 1024, len);
+        test_buf(file.clone(), 128 * 1024, len);
+        test_buf(file.clone(), 256 * 1024, len);
+        test_buf(file.clone(), 512 * 1024, len);
+        test_buf(file.clone(), 1024 * 1024, len);
     }
 }
 
@@ -54,7 +59,7 @@ fn test_buf(f: Arc<File>, buf_size: usize, file_size: u64) {
     let wl = rwl.write();
     let ops = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    for _ in 0..8 {
+    for _ in 0..thread::available_parallelism().unwrap().get() {
         let rwl = rwl.clone();
         let stop = stop.clone();
         let ops = ops.clone();
@@ -82,13 +87,27 @@ fn test_buf(f: Arc<File>, buf_size: usize, file_size: u64) {
         });
     }
     drop(wl);
-    let secs = 20;
+    let secs = 60;
     thread::sleep(Duration::from_secs(secs));
     stop.store(true, Ordering::Relaxed);
     let _ = rwl.write();
     let ops = ops.load(Ordering::Relaxed);
     println!(
-        "Buf: {buf_size} bytes. Operations: {ops}, IOPS/sec {}",
-        ops as u64 / secs
+        "Buf: {} Kb. IOPS {}, throughput {}/s",
+        buf_size / 1024,
+        ops as u64 / secs,
+        format_bytes(ops * buf_size / secs as usize)
     );
+}
+
+fn format_bytes(l: usize) -> String {
+    if l < 1024 {
+        format!("{}  b", l)
+    } else if l < 1024 * 1024 {
+        format!("{:.1} Kb", l as f64 / 1024.)
+    } else if l < 1024 * 1024 * 1024 {
+        format!("{:.1} Mb", l as f64 / 1024. / 1024.)
+    } else {
+        format!("{:.1} Gb", l as f64 / 1024. / 1024. / 1024.)
+    }
 }
