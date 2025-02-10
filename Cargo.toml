@@ -32,3 +32,6 @@ stress = [
     "histogram",
     "axum",
 ]
+random_access_speed_test = [
+    "tempdir"
+]
