@@ -139,9 +139,10 @@ impl IncrementalWalPosition {
 }
 
 #[derive(Clone)]
-pub struct WalLayout {
-    pub(crate) frag_size: u64,
-    pub(crate) max_maps: usize,
+pub(crate) struct WalLayout {
+    pub frag_size: u64,
+    pub max_maps: usize,
+    pub direct_io: bool,
 }
 
 impl WalLayout {
@@ -190,16 +191,11 @@ const fn align(l: u64) -> u64 {
 }
 
 impl Wal {
-    pub fn open(
-        p: &Path,
-        layout: WalLayout,
-        direct_io: bool,
-        metrics: Arc<Metrics>,
-    ) -> io::Result<Arc<Self>> {
+    pub fn open(p: &Path, layout: WalLayout, metrics: Arc<Metrics>) -> io::Result<Arc<Self>> {
         layout.assert_layout();
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
-        if direct_io {
+        if layout.direct_io {
             Self::set_o_direct(&mut options);
         }
         let file = options.open(p)?;
@@ -671,11 +667,12 @@ mod tests {
         let layout = WalLayout {
             frag_size: 1024,
             max_maps: 2,
+            direct_io: false,
         };
         // todo - add second test case when there is no space for skip marker after large
         let large = vec![1u8; 1024 - 8 - CrcFrame::CRC_HEADER_LENGTH * 3 - 9];
         {
-            let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let writer = wal
                 .wal_iterator(WalPosition::INVALID)
                 .unwrap()
@@ -694,7 +691,7 @@ mod tests {
             assert_eq!(&large, data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             assert_bytes(&[1, 2, 3], wal_iterator.next());
             assert_bytes(&[], wal_iterator.next());
@@ -709,14 +706,14 @@ mod tests {
             assert_eq!(&[91, 92, 93], data.as_ref());
         }
         {
-            let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             let mut wal_iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
             let p1 = assert_bytes(&[1, 2, 3], wal_iterator.next());
             let p2 = assert_bytes(&[], wal_iterator.next());
             let p3 = assert_bytes(&large, wal_iterator.next());
             let p4 = assert_bytes(&[91, 92, 93], wal_iterator.next());
             wal_iterator.next().expect_err("Error expected");
-            let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+            let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
             assert_eq!(&[1, 2, 3], wal.read(p1).unwrap().as_ref());
             assert_eq!(&[] as &[u8], wal.read(p2).unwrap().as_ref());
             assert_eq!(&large, wal.read(p3).unwrap().as_ref());
@@ -736,6 +733,7 @@ mod tests {
         let layout = WalLayout {
             frag_size: 512,
             max_maps: 2,
+            direct_io: false,
         };
         let mut position = IncrementalWalPosition {
             layout,
@@ -770,8 +768,9 @@ mod tests {
         let layout = WalLayout {
             frag_size: 512,
             max_maps: 2,
+            direct_io: false,
         };
-        let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
         let wal_writer = wal
             .wal_iterator(WalPosition::INVALID)
             .unwrap()
@@ -802,7 +801,7 @@ mod tests {
         }
         drop(wal_writer);
         drop(wal);
-        let wal = Wal::open(&file, layout.clone(), false, Metrics::new()).unwrap();
+        let wal = Wal::open(&file, layout.clone(), Metrics::new()).unwrap();
         let mut iterator = wal.wal_iterator(WalPosition::INVALID).unwrap();
         while let Ok((_, value)) = iterator.next() {
             let value = u64::from_be_bytes(value[..].try_into().unwrap());

@@ -50,10 +50,11 @@ impl Config {
         self.frag_size
     }
 
-    pub fn wal_layout(&self) -> WalLayout {
+    pub(crate) fn wal_layout(&self) -> WalLayout {
         WalLayout {
             frag_size: self.frag_size,
             max_maps: self.max_maps,
+            direct_io: self.direct_io,
         }
     }
 

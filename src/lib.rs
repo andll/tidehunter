@@ -16,7 +16,7 @@ mod primitives;
 mod prometheus;
 #[cfg(feature = "stress")]
 mod stress;
-pub mod wal;
+mod wal;
 mod wal_syncer;
 
 pub use minibytes;
