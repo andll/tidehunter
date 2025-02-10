@@ -6,8 +6,8 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::{fmt, thread};
 use std::time::Duration;
+use std::{fmt, thread};
 
 struct RandomAccessSpeedTest {
     direct_io: bool,
@@ -17,7 +17,7 @@ struct RandomAccessSpeedTest {
 pub(crate) fn random_access_speed_test() {
     for direct_io in [true, false] {
         for alignment in [512, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024] {
-            let test = RandomAccessSpeedTest{
+            let test = RandomAccessSpeedTest {
                 direct_io,
                 alignment,
             };
@@ -122,6 +122,11 @@ fn format_bytes(l: usize) -> String {
 
 impl fmt::Display for RandomAccessSpeedTest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Direct IO: {}, alignment {}", self.direct_io, self.alignment)
+        write!(
+            f,
+            "Direct IO: {}, alignment {}",
+            self.direct_io,
+            format_bytes(self.alignment as usize)
+        )
     }
 }
