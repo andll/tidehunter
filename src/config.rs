@@ -15,6 +15,8 @@ pub struct Config {
     pub snapshot_unload_threshold: u64,
     /// Percentage for the unload jitter
     pub unload_jitter_pct: usize,
+    /// Use O_DIRECT when working with wal
+    pub direct_io: bool,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             snapshot_written_bytes: 2 * 1024 * 1024 * 1024, // 2 Gb
             snapshot_unload_threshold: 2 * 2 * 1024 * 1024 * 1024, // 4 Gb
             unload_jitter_pct: 10,
+            direct_io: false,
         }
     }
 }
@@ -39,6 +42,7 @@ impl Config {
             snapshot_written_bytes: 128 * 1024 * 1024, // 128 Mb
             snapshot_unload_threshold: 2 * 128 * 1024 * 1024, // 256 Mb
             unload_jitter_pct: 10,
+            direct_io: false,
         }
     }
 
@@ -72,5 +76,9 @@ impl Config {
     #[inline]
     pub fn excess_dirty_keys(&self, dirty_keys_count: usize) -> bool {
         dirty_keys_count > self.max_dirty_keys
+    }
+
+    pub fn direct_io(&self) -> bool {
+        self.direct_io
     }
 }

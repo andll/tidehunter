@@ -61,7 +61,12 @@ impl Db {
             flusher,
             metrics.clone(),
         );
-        let wal = Wal::open(&Self::wal_path(path), config.wal_layout(), metrics.clone())?;
+        let wal = Wal::open(
+            &Self::wal_path(path),
+            config.wal_layout(),
+            config.direct_io(),
+            metrics.clone(),
+        )?;
         let wal_iterator = wal.wal_iterator(control_region.last_position())?;
         let wal_writer = Self::replay_wal(&key_shape, &large_table, wal_iterator, &metrics)?;
         let control_region_store = Mutex::new(control_region_store);
