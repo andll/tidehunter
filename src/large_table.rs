@@ -299,7 +299,7 @@ impl LargeTable {
 
     fn row(&self, ks: &KeySpaceDesc, k: &[u8]) -> (MutexGuard<'_, Row>, usize) {
         let ks_table = self.ks_table(ks);
-        let (mutex, offset) = ks.locate(k);
+        let (mutex, offset) = ks.location_for_key(k);
         let row = ks_table.lock(
             mutex,
             &self
@@ -459,7 +459,7 @@ impl LargeTable {
     > {
         let ks_table = self.ks_table(ks);
         loop {
-            let (row, offset) = ks.locate_cell(cell);
+            let (row, offset) = ks.location_for_cell(cell);
             let mut row = ks_table.lock(
                 row,
                 &self
@@ -502,7 +502,7 @@ impl LargeTable {
         loader: &L,
     ) -> Result<Option<(Bytes, WalPosition)>, L::Error> {
         // todo duplicate code with next_entry(...)
-        let (row, offset) = ks.locate_cell(cell);
+        let (row, offset) = ks.location_for_cell(cell);
         let ks_table = self.ks_table(ks);
         let mut row = ks_table.lock(
             row,
@@ -545,7 +545,7 @@ impl LargeTable {
         original_index: Arc<IndexTable>,
         position: WalPosition,
     ) {
-        let (row, offset) = ks.locate_cell(cell);
+        let (row, offset) = ks.location_for_cell(cell);
         let ks_table = self.ks_table(ks);
         let mut row = ks_table.lock(
             row,

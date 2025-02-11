@@ -4,8 +4,7 @@ use crate::control::ControlRegion;
 use crate::crc::{CrcFrame, CrcReadError, IntoBytesFixed};
 use crate::flusher::IndexFlusher;
 use crate::index_table::IndexTable;
-use crate::iterators::range_ordered::RangeOrderedIterator;
-use crate::iterators::unordered::UnorderedIterator;
+use crate::iterators::db_iterator::DbIterator;
 use crate::key_shape::{KeyShape, KeySpace, KeySpaceDesc};
 use crate::large_table::{GetResult, LargeTable, LargeTableContainer, Loader, Version};
 use crate::metrics::{Metrics, TimerExt};
@@ -18,7 +17,6 @@ use memmap2::{MmapMut, MmapOptions};
 use minibytes::Bytes;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
@@ -275,23 +273,9 @@ impl Db {
         Ok(())
     }
 
-    /// Unordered iterator over entire key space
-    pub fn unordered_iterator(self: &Arc<Self>, ks: KeySpace) -> UnorderedIterator {
-        UnorderedIterator::new(self.clone(), ks)
-    }
-
-    /// Ordered iterator over a pre-defined range of keys.
-    ///
-    /// Both start and end of the range should have the same first 4 bytes,
-    /// otherwise this function panics.
-    pub fn range_ordered_iterator(
-        self: &Arc<Self>,
-        ks: KeySpace,
-        range: Range<Bytes>,
-    ) -> RangeOrderedIterator {
-        // todo (fix) technically with Range<Bytes> end of the range is exclusive
-        let cell = self.key_shape.range_cell(ks, &range.start, &range.end);
-        RangeOrderedIterator::new(self.clone(), ks, cell, range)
+    /// Ordered iterator over DB in the specified range
+    pub fn iterator(self: &Arc<Self>, ks: KeySpace) -> DbIterator {
+        DbIterator::new(self.clone(), ks)
     }
 
     /// Returns last key-value pair in the given range, where both ends of the range are included
@@ -737,7 +721,6 @@ mod test {
     use crate::key_shape::{KeyShapeBuilder, KeySpaceConfig};
     use rand::rngs::ThreadRng;
     use rand::Rng;
-    use std::collections::HashSet;
 
     #[test]
     fn db_test() {
@@ -920,10 +903,11 @@ mod test {
     }
 
     #[test]
-    fn test_unordered_iterator() {
-        let dir = tempdir::TempDir::new("test-unordered-iterator").unwrap();
+    fn test_iterator() {
+        let dir = tempdir::TempDir::new("test-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(4, 12, 12);
+        let mut data = Vec::with_capacity(1024);
+        let (key_shape, ks) = KeyShape::new_single(4, 4, 4);
         {
             let db = Arc::new(
                 Db::open(
@@ -934,16 +918,19 @@ mod test {
                 )
                 .unwrap(),
             );
-            let mut it = db.unordered_iterator(ks);
+            let mut it = db.iterator(ks);
             assert!(it.next().is_none());
-            db.insert(ks, vec![1, 2, 3, 4], vec![5, 6]).unwrap();
-            db.insert(ks, vec![3, 4, 5, 6], vec![7]).unwrap();
-            let it = db.unordered_iterator(ks);
-            let s: DbResult<HashSet<_>> = it.collect();
+            for v in 0..1024u32 {
+                let v = v * 3;
+                let k = ku32(v);
+                let v = vu32(v);
+                data.push((k.clone(), v.clone()));
+                db.insert(ks, k, v).unwrap();
+            }
+            let it = db.iterator(ks);
+            let s: DbResult<Vec<_>> = it.collect();
             let s = s.unwrap();
-            assert_eq!(s.len(), 2);
-            assert!(s.contains(&(vec![1, 2, 3, 4].into(), vec![5, 6].into())));
-            assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
+            assert_eq!(s, data);
         }
         {
             let db = Arc::new(
@@ -955,13 +942,28 @@ mod test {
                 )
                 .unwrap(),
             );
-            let it = db.unordered_iterator(ks);
-            let s: DbResult<HashSet<_>> = it.collect();
+            let it = db.iterator(ks);
+            let s: DbResult<Vec<_>> = it.collect();
             let s = s.unwrap();
-            assert_eq!(s.len(), 2);
-            assert!(s.contains(&(vec![1, 2, 3, 4].into(), vec![5, 6].into())));
-            assert!(s.contains(&(vec![3, 4, 5, 6].into(), vec![7].into())));
+            assert_eq!(s, data);
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(6));
+            assert_eq!((ku32(6), vu32(6)), it.next().unwrap().unwrap());
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(7));
+            assert_eq!((ku32(9), vu32(9)), it.next().unwrap().unwrap());
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(1024 * 3));
+            assert!(it.next().is_none());
         }
+    }
+
+    fn ku32(k: u32) -> Bytes {
+        k.to_be_bytes().to_vec().into()
+    }
+
+    fn vu32(v: u32) -> Bytes {
+        v.to_le_bytes().to_vec().into()
     }
 
     #[test]
@@ -979,16 +981,15 @@ mod test {
                 )
                 .unwrap(),
             );
-            let mut it = db.unordered_iterator(ks);
+            let mut it = db.iterator(ks);
             assert!(it.next().is_none());
             db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
             db.insert(ks, vec![3, 4, 5, 6, 11], vec![7]).unwrap();
-            let it = db.range_ordered_iterator(
-                ks,
-                vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into(),
-            );
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(vec![1, 2, 3, 4, 0]);
+            it.set_upper_bound(vec![1, 2, 3, 4, 10]);
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
             assert_eq!(v.len(), 2);
@@ -1011,10 +1012,9 @@ mod test {
                 )
                 .unwrap(),
             );
-            let it = db.range_ordered_iterator(
-                ks,
-                vec![1, 2, 3, 4, 0].into()..vec![1, 2, 3, 4, 10].into(),
-            );
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(vec![1, 2, 3, 4, 0]);
+            it.set_upper_bound(vec![1, 2, 3, 4, 10]);
             let v: DbResult<Vec<_>> = it.collect();
             let v = v.unwrap();
             assert_eq!(v.len(), 2);
@@ -1300,8 +1300,8 @@ mod test {
                 // todo this code predates KS api so we calculate cells manually
                 // todo rewrite with using ks API instead
                 let ksd = db.key_shape.ks(ks);
-                let (mutex1, cell1) = ksd.locate(&other_key);
-                let (mutex2, cell2) = ksd.locate(&[1, 2, 3, 4, 5]);
+                let (mutex1, cell1) = ksd.location_for_key(&other_key);
+                let (mutex2, cell2) = ksd.location_for_key(&[1, 2, 3, 4, 5]);
                 assert_eq!(mutex1, mutex2);
                 assert_ne!(cell1, cell2);
                 // code below is needed to search for other_key

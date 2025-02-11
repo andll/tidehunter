@@ -135,13 +135,25 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn locate(&self, k: &[u8]) -> (usize, usize) {
+    /* Nomenclature for the various conversion methods below:
+     * **Location** is a tuple (mutex, offset) identifying the cell.
+     * **Cell** is a single usize identifying the cell.
+     * **Key** is a full key(u8 slice).
+     * **Prefix** is u32 representing a 4-byte prefix of the key used to map key to its cell.
+     */
+
+    pub(crate) fn location_for_key(&self, k: &[u8]) -> (usize, usize) {
         let prefix = self.cell_prefix(k);
         let cell = self.cell_by_prefix(prefix);
-        self.locate_cell(cell)
+        self.location_for_cell(cell)
     }
 
-    pub(crate) fn locate_cell(&self, cell: usize) -> (usize, usize) {
+    pub(crate) fn cell_for_key(&self, k: &[u8]) -> usize {
+        let prefix = self.cell_prefix(k);
+        self.cell_by_prefix(prefix)
+    }
+
+    pub(crate) fn location_for_cell(&self, cell: usize) -> (usize, usize) {
         let mutex = cell % self.num_mutexes();
         let offset = cell / self.num_mutexes();
         (mutex, offset)
@@ -339,7 +351,7 @@ mod tests {
             config: Default::default(),
         };
         for cell in 0..1024usize {
-            let (row, offset) = ks.locate_cell(cell);
+            let (row, offset) = ks.location_for_cell(cell);
             let evaluated_cell = ks.cell_by_location(row, offset);
             assert_eq!(evaluated_cell, cell);
         }
