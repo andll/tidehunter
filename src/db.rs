@@ -974,12 +974,52 @@ mod test {
         }
     }
 
-    fn ku32(k: u32) -> Bytes {
-        k.to_be_bytes().to_vec().into()
+    #[test]
+    fn test_iterator_gen() {
+        let sequential = Vec::from_iter(125u128..1125);
+        let mut random = sequential.clone();
+        ThreadRng::default().fill(&mut random[..]);
+        random.sort();
+        println!("Starting sequential test");
+        test_iterator_run(sequential);
+        println!("Starting random test");
+        test_iterator_run(random);
     }
 
-    fn vu32(v: u32) -> Bytes {
-        v.to_le_bytes().to_vec().into()
+    fn test_iterator_run(data: Vec<u128>) {
+        let dir = tempdir::TempDir::new("test-iterator").unwrap();
+        let config = Arc::new(Config::small());
+        let (key_shape, ks) = KeyShape::new_single(16, 4, 4);
+        let db = Arc::new(
+            Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap(),
+        );
+        for k in &data {
+            db.insert(ks, ku128(*k), vu128(*k)).unwrap();
+        }
+        let mut rng = ThreadRng::default();
+        for _ in 0..128 {
+            let from = rng.gen_range(0..data.len() - 1);
+            let to = rng.gen_range(from..data.len());
+            test_iterator_slice(&db, ks, &data[from..to]);
+        }
+    }
+
+    fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128]) {
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(ku128(slice[0]));
+        iterator.set_upper_bound(ku128(slice[slice.len() - 1] + 1));
+        let data: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
+        assert_eq!(data.len(), slice.len());
+        for ((key, value), expected) in data.into_iter().zip(slice.into_iter()) {
+            assert_eq!(key, ku128(*expected));
+            assert_eq!(value, vu128(*expected));
+        }
     }
 
     #[test]
@@ -1520,5 +1560,21 @@ mod test {
         let mut config2 = Config::clone(config);
         config2.snapshot_unload_threshold = 0;
         Arc::new(config2)
+    }
+
+    fn ku32(k: u32) -> Bytes {
+        k.to_be_bytes().to_vec().into()
+    }
+
+    fn vu32(v: u32) -> Bytes {
+        v.to_le_bytes().to_vec().into()
+    }
+
+    fn ku128(k: u128) -> Bytes {
+        k.to_be_bytes().to_vec().into()
+    }
+
+    fn vu128(v: u128) -> Bytes {
+        v.to_le_bytes().to_vec().into()
     }
 }
