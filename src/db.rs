@@ -946,14 +946,30 @@ mod test {
             let s: DbResult<Vec<_>> = it.collect();
             let s = s.unwrap();
             assert_eq!(s, data);
+
             let mut it = db.iterator(ks);
             it.set_lower_bound(ku32(6));
             assert_eq!((ku32(6), vu32(6)), it.next().unwrap().unwrap());
+
             let mut it = db.iterator(ks);
             it.set_lower_bound(ku32(7));
             assert_eq!((ku32(9), vu32(9)), it.next().unwrap().unwrap());
+
             let mut it = db.iterator(ks);
             it.set_lower_bound(ku32(1024 * 3));
+            assert!(it.next().is_none());
+
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(12));
+            it.set_upper_bound(ku32(16));
+            assert_eq!((ku32(12), vu32(12)), it.next().unwrap().unwrap());
+            assert_eq!((ku32(15), vu32(15)), it.next().unwrap().unwrap());
+            assert!(it.next().is_none());
+
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(12));
+            it.set_upper_bound(ku32(15));
+            assert_eq!((ku32(12), vu32(12)), it.next().unwrap().unwrap());
             assert!(it.next().is_none());
         }
     }
