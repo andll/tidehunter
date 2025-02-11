@@ -16,7 +16,10 @@ struct RandomAccessSpeedTest {
 
 pub(crate) fn random_access_speed_test() {
     for direct_io in [true, false] {
-        for alignment in [512, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024] {
+        for alignment in [1, 512, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024] {
+            if direct_io && alignment == 1 {
+                continue;
+            }
             let test = RandomAccessSpeedTest {
                 direct_io,
                 alignment,
