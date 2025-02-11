@@ -20,3 +20,5 @@ mod wal;
 mod wal_syncer;
 
 pub use minibytes;
+
+pub use wal::WalPosition;
