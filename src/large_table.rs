@@ -447,7 +447,8 @@ impl LargeTable {
         mut cell: usize,
         mut next_key: Option<Bytes>,
         loader: &L,
-        max_cell_exclusive: Option<usize>,
+        end_cell_exclusive: Option<usize>,
+        reverse: bool,
     ) -> Result<
         Option<(
             Option<usize>, /*next cell*/
@@ -470,21 +471,27 @@ impl LargeTable {
             let entry = row.entry_mut(offset);
             // todo read from disk instead of loading
             entry.maybe_load(loader)?;
-            if let Some((key, value, next_key)) = entry.next_entry(next_key) {
+            if let Some((key, value, next_key)) = entry.next_entry(next_key, reverse) {
                 let next_cell = if next_key.is_none() {
-                    ks.next_cell(cell)
+                    ks.next_cell(cell, reverse)
                 } else {
                     Some(cell)
                 };
                 return Ok(Some((next_cell, next_key, key, value)));
             } else {
                 next_key = None;
-                let Some(next_cell) = ks.next_cell(cell) else {
+                let Some(next_cell) = ks.next_cell(cell, reverse) else {
                     return Ok(None);
                 };
-                if let Some(max_cell_exclusive) = max_cell_exclusive {
-                    if next_cell >= max_cell_exclusive {
-                        return Ok(None);
+                if let Some(end_cell_exclusive) = end_cell_exclusive {
+                    if reverse {
+                        if next_cell <= end_cell_exclusive {
+                            return Ok(None);
+                        }
+                    } else {
+                        if next_cell >= end_cell_exclusive {
+                            return Ok(None);
+                        }
                     }
                 }
                 cell = next_cell;
@@ -735,11 +742,12 @@ impl LargeTableEntry {
     pub fn next_entry(
         &self,
         next_key: Option<Bytes>,
+        reverse: bool,
     ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
         if matches!(&self.state, LargeTableEntryState::Unloaded(_)) {
             panic!("Can't next_entry in unloaded state");
         }
-        self.data.next_entry(next_key)
+        self.data.next_entry(next_key, reverse)
     }
 
     pub fn maybe_load<L: Loader>(&mut self, loader: &L) -> Result<(), L::Error> {

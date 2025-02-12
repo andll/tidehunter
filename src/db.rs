@@ -348,7 +348,8 @@ impl Db {
         ks: KeySpace,
         cell: usize,
         next_key: Option<Bytes>,
-        max_cell_exclusive: Option<usize>,
+        end_cell_exclusive: Option<usize>,
+        reverse: bool,
     ) -> DbResult<
         Option<(
             Option<usize>, /*next cell*/
@@ -365,7 +366,7 @@ impl Db {
             .mcs_timer();
         let Some((next_cell, next_key, key, wal_position)) =
             self.large_table
-                .next_entry(ks, cell, next_key, self, max_cell_exclusive)?
+                .next_entry(ks, cell, next_key, self, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
@@ -971,6 +972,14 @@ mod test {
             it.set_upper_bound(ku32(15));
             assert_eq!((ku32(12), vu32(12)), it.next().unwrap().unwrap());
             assert!(it.next().is_none());
+
+            // Reverse iterator
+            let mut it = db.iterator(ks);
+            it.set_lower_bound(ku32(12));
+            it.set_upper_bound(ku32(15));
+            it.reverse();
+            assert_eq!((ku32(12), vu32(12)), it.next().unwrap().unwrap());
+            assert!(it.next().is_none());
         }
     }
 
@@ -1003,20 +1012,31 @@ mod test {
             db.insert(ks, ku128(*k), vu128(*k)).unwrap();
         }
         let mut rng = ThreadRng::default();
-        for _ in 0..128 {
-            let from = rng.gen_range(0..data.len() - 1);
-            let to = rng.gen_range(from..data.len());
-            test_iterator_slice(&db, ks, &data[from..to]);
+        for reverse in [true, false] {
+            println!("Testing with reverse={reverse}");
+            for _ in 0..128 {
+                let from = rng.gen_range(0..data.len() - 1);
+                let to = rng.gen_range(from + 1..data.len());
+                test_iterator_slice(&db, ks, &data[from..to], reverse);
+            }
         }
     }
 
-    fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128]) {
+    fn test_iterator_slice(db: &Arc<Db>, ks: KeySpace, slice: &[u128], reverse: bool) {
         let mut iterator = db.iterator(ks);
         iterator.set_lower_bound(ku128(slice[0]));
         iterator.set_upper_bound(ku128(slice[slice.len() - 1] + 1));
+        if reverse {
+            iterator.reverse();
+        }
         let data: Vec<_> = iterator.collect::<DbResult<_>>().unwrap();
         assert_eq!(data.len(), slice.len());
-        for ((key, value), expected) in data.into_iter().zip(slice.into_iter()) {
+        let slice_iter: Box<dyn Iterator<Item = &u128>> = if reverse {
+            Box::new(slice.into_iter().rev())
+        } else {
+            Box::new(slice.into_iter())
+        };
+        for ((key, value), expected) in data.into_iter().zip(slice_iter) {
             assert_eq!(key, ku128(*expected));
             assert_eq!(value, vu128(*expected));
         }
@@ -1410,6 +1430,7 @@ mod test {
             );
             db.insert(ks, vec![1, 2, 3, 4, 11], vec![11]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 12], vec![12]).unwrap();
+            thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
             check_metrics(&db.metrics, 0, 1, 0, 0);
             check_all(&db, ks, 12);
             db.insert(ks, vec![1, 2, 3, 4, 13], vec![13]).unwrap();

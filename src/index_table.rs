@@ -98,7 +98,11 @@ impl IndexTable {
     ///
     /// This works even if next is set to Some(k), but the value at k does not exist (for ex. was deleted).
     /// For this reason, the returned key might be different from the next key requested.
-    pub fn next_entry(&self, next: Option<Bytes>) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
+    pub fn next_entry(
+        &self,
+        next: Option<Bytes>,
+        reverse: bool,
+    ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
         fn take_next<'a>(
             mut iter: impl Iterator<Item = (&'a Bytes, &'a WalPosition)>,
         ) -> Option<(Bytes, WalPosition, Option<Bytes>)> {
@@ -108,10 +112,20 @@ impl IndexTable {
         }
 
         if let Some(next) = next {
-            let range = self.data.range(next..);
-            take_next(range.into_iter())
+            if reverse {
+                let range = self.data.range(..=next);
+                take_next(range.into_iter().rev())
+            } else {
+                let range = self.data.range(next..);
+                take_next(range.into_iter())
+            }
         } else {
-            take_next(self.data.iter())
+            let iterator = self.data.iter();
+            if reverse {
+                take_next(iterator.rev())
+            } else {
+                take_next(iterator)
+            }
         }
     }
 
@@ -362,6 +376,68 @@ mod tests {
                 (vec![3].into(), WalPosition::test_value(8))
             ]
         );
+    }
+
+    #[test]
+    fn test_next_entry() {
+        let mut table = IndexTable::default();
+        table.insert(vec![1, 2, 3, 4].into(), WalPosition::test_value(1));
+        table.insert(vec![1, 2, 3, 7].into(), WalPosition::test_value(2));
+        table.insert(vec![1, 2, 4, 5].into(), WalPosition::test_value(3));
+
+        // Reverse = false
+
+        // existing element - next found
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
+        assert_eq!(next.1, WalPosition::test_value(2));
+        assert_eq!(next.2, Some(vec![1, 2, 4, 5].into()));
+
+        // not existing element - next found
+        let next = table.next_entry(Some(vec![1, 2, 3, 6].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
+        assert_eq!(next.1, WalPosition::test_value(2));
+        assert_eq!(next.2, Some(vec![1, 2, 4, 5].into()));
+
+        // existing element - next not found
+        let next = table.next_entry(Some(vec![1, 2, 4, 5].into()), false);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 4, 5]));
+        assert_eq!(next.1, WalPosition::test_value(3));
+        assert_eq!(next.2, None);
+
+        // not existing element - next not found
+        let next = table.next_entry(Some(vec![1, 2, 4, 6].into()), false);
+        assert!(next.is_none());
+
+        // Reverse = true
+
+        // existing element - next found
+        let next = table.next_entry(Some(vec![1, 2, 3, 7].into()), true);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
+        assert_eq!(next.1, WalPosition::test_value(2));
+        assert_eq!(next.2, Some(vec![1, 2, 3, 4].into()));
+
+        // not existing element - next found
+        let next = table.next_entry(Some(vec![1, 2, 3, 8].into()), true);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 7]));
+        assert_eq!(next.1, WalPosition::test_value(2));
+        assert_eq!(next.2, Some(vec![1, 2, 3, 4].into()));
+
+        // existing element - next not found
+        let next = table.next_entry(Some(vec![1, 2, 3, 4].into()), true);
+        let next = next.unwrap();
+        assert_eq!(next.0, Bytes::from(vec![1, 2, 3, 4]));
+        assert_eq!(next.1, WalPosition::test_value(1));
+        assert_eq!(next.2, None);
+
+        // not existing element - next not found
+        let next = table.next_entry(Some(vec![1, 2, 3, 3].into()), true);
+        assert!(next.is_none());
     }
 
     fn k(k: u128) -> Bytes {

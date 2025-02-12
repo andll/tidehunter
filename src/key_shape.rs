@@ -172,11 +172,15 @@ impl KeySpaceDesc {
         self.per_mutex
     }
 
-    pub fn next_cell(&self, cell: usize) -> Option<usize> {
-        if cell >= self.num_cells() - 1 {
-            None
+    pub fn next_cell(&self, cell: usize, reverse: bool) -> Option<usize> {
+        if reverse {
+            cell.checked_sub(1)
         } else {
-            Some(cell + 1)
+            if cell >= self.num_cells() - 1 {
+                None
+            } else {
+                Some(cell + 1)
+            }
         }
     }
 
