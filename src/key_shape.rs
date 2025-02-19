@@ -7,7 +7,7 @@ use minibytes::Bytes;
 use std::cmp;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -24,6 +24,10 @@ pub struct KeySpace(pub(crate) u8);
 
 #[derive(Clone)]
 pub(crate) struct KeySpaceDesc {
+    inner: Arc<KeySpaceDescInner>,
+}
+
+pub(crate) struct KeySpaceDescInner {
     id: KeySpace,
     name: String,
     key_size: usize,
@@ -96,13 +100,16 @@ impl KeyShapeBuilder {
         );
 
         let ks = KeySpace(self.key_spaces.len() as u8);
-        let key_space = KeySpaceDesc {
+        let key_space = KeySpaceDescInner {
             id: ks,
             name,
             key_size,
             mutexes,
             per_mutex,
             config,
+        };
+        let key_space = KeySpaceDesc {
+            inner: Arc::new(key_space),
         };
         self.key_spaces.push(key_space);
         ks
@@ -280,13 +287,16 @@ impl KeySpaceDesc {
 
     // See impl Default for IndexTable for details
     pub(crate) fn new_invalid() -> Self {
-        Self {
+        let key_space = KeySpaceDescInner {
             id: KeySpace(u8::MAX),
             key_size: 0,
             name: "".to_string(),
             per_mutex: 0,
             mutexes: 0,
             config: Default::default(),
+        };
+        Self {
+            inner: Arc::new(key_space),
         }
     }
 }
@@ -331,13 +341,16 @@ impl KeySpaceConfig {
 
 impl KeyShape {
     pub fn new_single(key_size: usize, mutexes: usize, per_mutex: usize) -> (Self, KeySpace) {
-        let key_space = KeySpaceDesc {
+        let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
             key_size,
             mutexes,
             per_mutex,
             config: Default::default(),
+        };
+        let key_space = KeySpaceDesc {
+            inner: Arc::new(key_space),
         };
         let key_spaces = vec![key_space];
         let this = Self { key_spaces };
@@ -379,19 +392,30 @@ impl KeySpace {
     }
 }
 
+impl Deref for KeySpaceDesc {
+    type Target = KeySpaceDescInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_cell_by_location() {
-        let ks = KeySpaceDesc {
+        let ks = KeySpaceDescInner {
             id: KeySpace(0),
             name: "".to_string(),
             key_size: 0,
             mutexes: 128,
             per_mutex: 512,
             config: Default::default(),
+        };
+        let ks = KeySpaceDesc {
+            inner: Arc::new(ks),
         };
         for cell in 0..1024usize {
             let (row, offset) = ks.location_for_cell(cell);
