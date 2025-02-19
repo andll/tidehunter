@@ -39,6 +39,7 @@ pub struct KeySpaceConfig {
     disable_unload: bool,
     bloom_filter: Option<BloomFilterParams>,
     value_cache_size: usize,
+    key_reduction: Option<Range<usize>>,
 }
 
 #[derive(Default, Clone)]
@@ -184,8 +185,16 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn key_size(&self) -> usize {
+    pub(crate) fn full_key_size(&self) -> usize {
         self.key_size
+    }
+
+    pub(crate) fn reduced_key_size(&self) -> usize {
+        if let Some(key_reduction) = &self.config.key_reduction {
+            key_reduction.len()
+        } else {
+            self.key_size
+        }
     }
 
     pub(crate) fn num_cells(&self) -> usize {
@@ -229,6 +238,22 @@ impl KeySpaceDesc {
         }
     }
 
+    pub(crate) fn reduce_key<'a>(&self, key: &'a [u8]) -> &'a [u8] {
+        if let Some(key_reduction) = &self.config.key_reduction {
+            &key[key_reduction.clone()]
+        } else {
+            key
+        }
+    }
+
+    pub(crate) fn reduced_key_bytes(&self, key: Bytes) -> Bytes {
+        if let Some(key_reduction) = &self.config.key_reduction {
+            key.slice(key_reduction.clone())
+        } else {
+            key
+        }
+    }
+
     pub(crate) fn compactor(&self) -> Option<&Compactor> {
         self.config.compactor.as_ref().map(Arc::as_ref)
     }
@@ -262,10 +287,7 @@ impl KeySpaceConfig {
     pub fn new_with_key_offset(key_offset: usize) -> Self {
         Self {
             key_offset,
-            compactor: None,
-            disable_unload: false,
-            bloom_filter: None,
-            value_cache_size: 0,
+            ..Self::default()
         }
     }
 
@@ -286,6 +308,11 @@ impl KeySpaceConfig {
 
     pub fn with_value_cache_size(mut self, size: usize) -> Self {
         self.value_cache_size = size;
+        self
+    }
+
+    pub fn with_key_reduction(mut self, key_reduction: Range<usize>) -> Self {
+        self.key_reduction = Some(key_reduction);
         self
     }
 }

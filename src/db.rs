@@ -518,8 +518,9 @@ impl Db {
 
     fn report_memory_estimates(&self) {
         for ks in self.key_shape.iter_ks() {
-            let cache_estimate =
-                (ks.key_size() + WalPosition::SIZE) * ks.num_cells() * self.config.max_dirty_keys;
+            let cache_estimate = (ks.reduced_key_size() + WalPosition::SIZE)
+                * ks.num_cells()
+                * self.config.max_dirty_keys;
             self.metrics
                 .memory_estimate
                 .with_label_values(&[ks.name(), "index_cache"])

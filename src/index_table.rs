@@ -155,13 +155,13 @@ impl IndexTable {
         out.put_bytes(0, HEADER_SIZE);
         let mut header = IndexTableHeaderBuilder::new(ks);
         for (key, value) in self.data.iter() {
-            if key.len() != ks.key_size() {
+            if key.len() != ks.reduced_key_size() {
                 // todo make into debug assertion
                 panic!(
                     "Index in ks {} contains key length {} (configured {})",
                     ks.name(),
                     key.len(),
-                    ks.key_size()
+                    ks.reduced_key_size()
                 );
             }
             header.add_key(key, out.len());
@@ -181,9 +181,9 @@ impl IndexTable {
 
         let mut data = BTreeMap::new();
         for i in 0..elements {
-            let key = b.slice(i * element_size..(i * element_size + ks.key_size()));
+            let key = b.slice(i * element_size..(i * element_size + ks.reduced_key_size()));
             let value = WalPosition::from_slice(
-                &b[(i * element_size + ks.key_size())..(i * element_size + element_size)],
+                &b[(i * element_size + ks.reduced_key_size())..(i * element_size + element_size)],
             );
             data.insert(key, value);
         }
@@ -193,7 +193,7 @@ impl IndexTable {
     }
 
     pub fn element_size(ks: &KeySpaceDesc) -> usize {
-        ks.key_size() + WalPosition::LENGTH
+        ks.reduced_key_size() + WalPosition::LENGTH
     }
 
     pub fn lookup_unloaded(
@@ -201,7 +201,7 @@ impl IndexTable {
         reader: &impl RandomRead,
         key: &[u8],
     ) -> Option<WalPosition> {
-        let key_size = ks.key_size();
+        let key_size = ks.reduced_key_size();
         assert_eq!(key.len(), key_size);
         let micro_cell = Self::key_micro_cell(ks, key);
         let header_element =
