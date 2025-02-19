@@ -483,7 +483,7 @@ impl Db {
             .flushed_keys
             .with_label_values(&[ksd.name()])
             .inc_by(index.len() as u64);
-        let index = index.to_bytes(ksd);
+        let index = index.to_bytes();
         self.metrics
             .flushed_bytes
             .with_label_values(&[ksd.name()])

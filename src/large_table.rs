@@ -642,10 +642,10 @@ impl LargeTableEntry {
             .bloom_filter()
             .map(|params| BloomFilter::with_rate(params.rate, params.count));
         Self {
+            data: ArcCow::new_owned(IndexTable::new(ks.clone())),
             ks,
             cell,
             state,
-            data: Default::default(),
             last_added_position: Default::default(),
             metrics,
             bloom_filter,

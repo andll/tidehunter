@@ -8,8 +8,9 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::RangeInclusive;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct IndexTable {
+    ks: KeySpaceDesc,
     // todo instead of loading entire BTreeMap in memory we should be able
     // to load parts of it from disk
     pub(crate) data: BTreeMap<Bytes, WalPosition>,
@@ -20,6 +21,10 @@ const HEADER_ELEMENT_SIZE: usize = 8;
 const HEADER_SIZE: usize = HEADER_ELEMENTS * HEADER_ELEMENT_SIZE;
 
 impl IndexTable {
+    pub fn new(ks: KeySpaceDesc) -> Self {
+        let data = Default::default();
+        Self { ks, data }
+    }
     pub fn insert(&mut self, k: Bytes, v: WalPosition) -> Option<WalPosition> {
         // Only update index entry if new entry has higher wal position then the previous entry
         // See test_concurrent_single_value_update for details how this is tested
@@ -148,20 +153,20 @@ impl IndexTable {
         self.data.len()
     }
 
-    pub fn to_bytes(&self, ks: &KeySpaceDesc) -> Bytes {
-        let element_size = Self::element_size(ks);
+    pub fn to_bytes(&self) -> Bytes {
+        let element_size = Self::element_size(&self.ks);
         let capacity = element_size * self.data.len() + HEADER_SIZE;
         let mut out = BytesMut::with_capacity(capacity);
         out.put_bytes(0, HEADER_SIZE);
-        let mut header = IndexTableHeaderBuilder::new(ks);
+        let mut header = IndexTableHeaderBuilder::new(&self.ks);
         for (key, value) in self.data.iter() {
-            if key.len() != ks.reduced_key_size() {
+            if key.len() != self.ks.reduced_key_size() {
                 // todo make into debug assertion
                 panic!(
                     "Index in ks {} contains key length {} (configured {})",
-                    ks.name(),
+                    self.ks.name(),
                     key.len(),
-                    ks.reduced_key_size()
+                    self.ks.reduced_key_size()
                 );
             }
             header.add_key(key, out.len());
@@ -189,10 +194,11 @@ impl IndexTable {
         }
 
         assert_eq!(data.len(), elements);
-        Self { data }
+        let ks = ks.clone();
+        Self { ks, data }
     }
 
-    pub fn element_size(ks: &KeySpaceDesc) -> usize {
+    fn element_size(ks: &KeySpaceDesc) -> usize {
         ks.reduced_key_size() + WalPosition::LENGTH
     }
 
@@ -299,18 +305,18 @@ mod tests {
     pub fn test_index_lookup() {
         let (shape, ks) = KeyShape::new_single(16, 8, 8);
         let ks = shape.ks(ks);
-        let mut index = IndexTable::default();
+        let mut index = IndexTable::new(ks.clone());
         index.insert(k(1), w(5));
         index.insert(k(5), w(10));
-        let bytes = index.to_bytes(ks);
+        let bytes = index.to_bytes();
         assert_eq!(None, IndexTable::lookup_unloaded(ks, &bytes, &k(0)));
         assert_eq!(Some(w(5)), IndexTable::lookup_unloaded(ks, &bytes, &k(1)));
         assert_eq!(Some(w(10)), IndexTable::lookup_unloaded(ks, &bytes, &k(5)));
         assert_eq!(None, IndexTable::lookup_unloaded(ks, &bytes, &k(10)));
-        let mut index = IndexTable::default();
+        let mut index = IndexTable::new(ks.clone());
         index.insert(k(u128::MAX), w(15));
         index.insert(k(u128::MAX - 5), w(25));
-        let bytes = index.to_bytes(ks);
+        let bytes = index.to_bytes();
         assert_eq!(
             Some(w(15)),
             IndexTable::lookup_unloaded(ks, &bytes, &k(u128::MAX))
@@ -335,7 +341,7 @@ mod tests {
         const P: usize = 8;
         let (shape, ks) = KeyShape::new_single(16, M, P);
         let ks = shape.ks(ks);
-        let mut index = IndexTable::default();
+        let mut index = IndexTable::new(ks.clone());
         let mut rng = ThreadRng::default();
         let target_bucket = rng.gen_range(0..((M * P) as u128));
         let bucket_size = u128::MAX / ((M * P) as u128);
@@ -346,7 +352,7 @@ mod tests {
             let pos = rng.next_u64();
             index.insert(k(key), w(pos));
         }
-        let bytes = index.to_bytes(ks);
+        let bytes = index.to_bytes();
         for (key, expected_value) in index.data {
             let value = IndexTable::lookup_unloaded(ks, &bytes, &key);
             assert_eq!(Some(expected_value), value);
@@ -360,7 +366,8 @@ mod tests {
 
     #[test]
     pub fn test_unmerge_flushed() {
-        let mut index = IndexTable::default();
+        let (shape, ks) = KeyShape::new_single(16, 1, 1);
+        let mut index = IndexTable::new(shape.ks(ks).clone());
         index.insert(vec![1].into(), WalPosition::test_value(2));
         index.insert(vec![2].into(), WalPosition::test_value(3));
         index.insert(vec![6].into(), WalPosition::test_value(4));
@@ -380,7 +387,8 @@ mod tests {
 
     #[test]
     fn test_next_entry() {
-        let mut table = IndexTable::default();
+        let (shape, ks) = KeyShape::new_single(16, 1, 1);
+        let mut table = IndexTable::new(shape.ks(ks).clone());
         table.insert(vec![1, 2, 3, 4].into(), WalPosition::test_value(1));
         table.insert(vec![1, 2, 3, 7].into(), WalPosition::test_value(2));
         table.insert(vec![1, 2, 4, 5].into(), WalPosition::test_value(3));
@@ -446,5 +454,16 @@ mod tests {
 
     fn w(w: u64) -> WalPosition {
         WalPosition::test_value(w)
+    }
+}
+
+/// This Default implementation creates invalid IndexTable
+/// Only needed because ArcCow now needs Default implemented to create temporary variable for swap
+/// todo - need to fix ArcCow so it does not need Default implemented
+impl Default for IndexTable {
+    fn default() -> Self {
+        let ks = KeySpaceDesc::new_invalid();
+        let data = Default::default();
+        Self { ks, data }
     }
 }
