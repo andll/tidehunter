@@ -284,21 +284,6 @@ impl KeySpaceDesc {
     pub fn id(&self) -> KeySpace {
         self.id
     }
-
-    // See impl Default for IndexTable for details
-    pub(crate) fn new_invalid() -> Self {
-        let key_space = KeySpaceDescInner {
-            id: KeySpace(u8::MAX),
-            key_size: 0,
-            name: "".to_string(),
-            per_mutex: 0,
-            mutexes: 0,
-            config: Default::default(),
-        };
-        Self {
-            inner: Arc::new(key_space),
-        }
-    }
 }
 
 impl KeySpaceConfig {
