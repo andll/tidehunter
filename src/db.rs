@@ -253,29 +253,29 @@ impl Db {
         // todo implement atomic durability
         let WriteBatch { writes, deletes } = batch;
         let mut last_position = WalPosition::INVALID;
-        for (ks, k, w, value) in writes {
+        for w in writes {
             self.metrics
                 .wal_written_bytes_type
                 .with_label_values(&["record"])
-                .inc_by(w.len() as u64);
-            let position = self.wal_writer.write(&w)?;
-            let ks = self.key_shape.ks(ks);
-            ks.check_key(&k);
-            let reduced_key = ks.reduced_key_bytes(k);
+                .inc_by(w.wal_write.len() as u64);
+            let position = self.wal_writer.write(&w.wal_write)?;
+            let ks = self.key_shape.ks(w.ks);
+            ks.check_key(&w.key);
+            let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table
-                .insert(ks, reduced_key, position, &value, self)?;
+                .insert(ks, reduced_key, position, &w.value, self)?;
             last_position = position;
         }
 
-        for (ks, k, w) in deletes {
+        for w in deletes {
             self.metrics
                 .wal_written_bytes_type
                 .with_label_values(&["tombstone"])
-                .inc_by(w.len() as u64);
-            let position = self.wal_writer.write(&w)?;
-            let ks = self.key_shape.ks(ks);
-            ks.check_key(&k);
-            let reduced_key = ks.reduced_key_bytes(k);
+                .inc_by(w.wal_write.len() as u64);
+            let position = self.wal_writer.write(&w.wal_write)?;
+            let ks = self.key_shape.ks(w.ks);
+            ks.check_key(&w.key);
+            let reduced_key = ks.reduced_key_bytes(w.key);
             self.large_table.remove(ks, reduced_key, position, self)?;
             last_position = position;
         }
