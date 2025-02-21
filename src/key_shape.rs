@@ -192,8 +192,8 @@ impl KeySpaceDesc {
         }
     }
 
-    pub(crate) fn full_key_size(&self) -> usize {
-        self.key_size
+    pub(crate) fn key_reduction(&self) -> &Option<Range<usize>> {
+        &self.config.key_reduction
     }
 
     pub(crate) fn reduced_key_size(&self) -> usize {
@@ -326,13 +326,22 @@ impl KeySpaceConfig {
 
 impl KeyShape {
     pub fn new_single(key_size: usize, mutexes: usize, per_mutex: usize) -> (Self, KeySpace) {
+        Self::new_single_config(key_size, mutexes, per_mutex, Default::default())
+    }
+
+    pub fn new_single_config(
+        key_size: usize,
+        mutexes: usize,
+        per_mutex: usize,
+        config: KeySpaceConfig,
+    ) -> (Self, KeySpace) {
         let key_space = KeySpaceDescInner {
             id: KeySpace(0),
             name: "root".into(),
             key_size,
             mutexes,
             per_mutex,
-            config: Default::default(),
+            config,
         };
         let key_space = KeySpaceDesc {
             inner: Arc::new(key_space),

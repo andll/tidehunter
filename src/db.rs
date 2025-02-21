@@ -186,7 +186,9 @@ impl Db {
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
         self.metrics.wal_written_bytes.set(position.as_u64() as i64);
-        self.large_table.insert(ks, k, position, &v, self)?;
+        let reduced_key = ks.reduced_key_bytes(k);
+        self.large_table
+            .insert(ks, reduced_key, position, &v, self)?;
         Ok(())
     }
 
@@ -205,7 +207,8 @@ impl Db {
             .with_label_values(&["tombstone"])
             .inc_by(w.len() as u64);
         let position = self.wal_writer.write(&w)?;
-        Ok(self.large_table.remove(ks, k, position, self)?)
+        let reduced_key = ks.reduced_key_bytes(k);
+        Ok(self.large_table.remove(ks, reduced_key, position, self)?)
     }
 
     pub fn get(&self, ks: KeySpace, k: &[u8]) -> DbResult<Option<Bytes>> {
@@ -215,12 +218,19 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["get", ks.name()])
             .mcs_timer();
-        match self.large_table.get(ks, k, self)? {
-            GetResult::Value(value) => Ok(Some(value)),
+        let reduced_key = ks.reduce_key(k);
+        match self.large_table.get(ks, reduced_key, self)? {
+            GetResult::Value(value) => {
+                // todo check collision ?
+                Ok(Some(value))
+            }
             GetResult::WalPosition(w) => {
-                let value = self.read_record(k, w)?;
+                let value = self.read_record_check_key(k, w)?;
+                let Some(value) = value else {
+                    return Ok(None);
+                };
                 self.large_table
-                    .update_lru(ks, k.to_vec().into(), value.clone());
+                    .update_lru(ks, reduced_key.to_vec().into(), value.clone());
                 Ok(Some(value))
             }
             GetResult::NotFound => Ok(None),
@@ -234,7 +244,9 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["exists", ks.name()])
             .mcs_timer();
-        Ok(self.large_table.get(ks, k, self)?.is_found())
+        // todo check collision ?
+        let reduced_key = ks.reduce_key(k);
+        Ok(self.large_table.get(ks, reduced_key, self)?.is_found())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> DbResult<()> {
@@ -249,7 +261,9 @@ impl Db {
             let position = self.wal_writer.write(&w)?;
             let ks = self.key_shape.ks(ks);
             ks.check_key(&k);
-            self.large_table.insert(ks, k, position, &value, self)?;
+            let reduced_key = ks.reduced_key_bytes(k);
+            self.large_table
+                .insert(ks, reduced_key, position, &value, self)?;
             last_position = position;
         }
 
@@ -259,9 +273,10 @@ impl Db {
                 .with_label_values(&["tombstone"])
                 .inc_by(w.len() as u64);
             let position = self.wal_writer.write(&w)?;
-            self.key_shape.ks(ks).check_key(&k);
-            self.large_table
-                .remove(self.key_shape.ks(ks), k, position, self)?;
+            let ks = self.key_shape.ks(ks);
+            ks.check_key(&k);
+            let reduced_key = ks.reduced_key_bytes(k);
+            self.large_table.remove(ks, reduced_key, position, self)?;
             last_position = position;
         }
         if last_position != WalPosition::INVALID {
@@ -285,8 +300,8 @@ impl Db {
     pub fn last_in_range(
         &self,
         ks: KeySpace,
-        from_included: &Bytes,
-        to_included: &Bytes,
+        full_from_included: &Bytes,
+        full_to_included: &Bytes,
     ) -> DbResult<Option<(Bytes, Bytes)>> {
         let ks = self.key_shape.ks(ks);
         let _timer = self
@@ -294,17 +309,24 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["last_in_range", ks.name()])
             .mcs_timer();
+        // todo use reduced_key instead of reduced_key_bytes
+        let from_included = ks.reduced_key_bytes(full_from_included.clone());
+        let to_included = ks.reduced_key_bytes(full_to_included.clone());
         let cell = self
             .key_shape
-            .range_cell(ks.id(), from_included, to_included);
-        let Some((key, position)) =
+            .range_cell(ks.id(), &from_included, &to_included);
+        let Some((_key, position)) =
             self.large_table
-                .last_in_range(ks, cell, from_included, to_included, self)?
+                .last_in_range(ks, cell, &from_included, &to_included, self)?
         else {
             return Ok(None);
         };
-        let value = self.read_record(&key, position)?;
-        Ok(Some((key, value)))
+        let (key, value) = self.read_record(position)?;
+        if key <= full_to_included && key >= full_from_included {
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Returns true if this db is empty.
@@ -364,13 +386,13 @@ impl Db {
             .db_op_mcs
             .with_label_values(&["next_entry", ks.name()])
             .mcs_timer();
-        let Some((next_cell, next_key, key, wal_position)) =
+        let Some((next_cell, next_key, _key, wal_position)) =
             self.large_table
                 .next_entry(ks, cell, next_key, self, end_cell_exclusive, reverse)?
         else {
             return Ok(None);
         };
-        let value = self.read_record(&key, wal_position)?;
+        let (key, value) = self.read_record(wal_position)?;
         Ok(Some((next_cell, next_key, key, value)))
     }
 
@@ -392,11 +414,19 @@ impl Db {
         Self::read_index(ks, entry)
     }
 
-    fn read_record(&self, k: &[u8], position: WalPosition) -> DbResult<Bytes> {
+    fn read_record_check_key(&self, k: &[u8], position: WalPosition) -> DbResult<Option<Bytes>> {
+        let (wal_key, v) = self.read_record(position)?;
+        if wal_key.as_ref() != k {
+            Ok(None)
+        } else {
+            Ok(Some(v))
+        }
+    }
+
+    fn read_record(&self, position: WalPosition) -> DbResult<(Bytes, Bytes)> {
         let entry = self.read_report_entry(position)?;
-        if let WalEntry::Record(KeySpace(_), wal_key, v) = entry {
-            debug_assert_eq!(wal_key.as_ref(), k);
-            Ok(v)
+        if let WalEntry::Record(KeySpace(_), k, v) = entry {
+            Ok((k, v))
         } else {
             panic!("Unexpected wal entry where expected record");
         }
@@ -436,14 +466,17 @@ impl Db {
                 WalEntry::Record(ks, k, v) => {
                     metrics.replayed_wal_records.inc();
                     let ks = key_shape.ks(ks);
-                    large_table.insert(ks, k, position, &v, wal_iterator.wal())?;
+                    let reduced_key = ks.reduced_key_bytes(k);
+                    large_table.insert(ks, reduced_key, position, &v, wal_iterator.wal())?;
                 }
                 WalEntry::Index(_ks, _bytes) => {
                     // todo - handle this by updating large table to Loaded()
                 }
                 WalEntry::Remove(ks, k) => {
                     metrics.replayed_wal_records.inc();
-                    large_table.remove(key_shape.ks(ks), k, position, wal_iterator.wal())?;
+                    let ks = key_shape.ks(ks);
+                    let reduced_key = ks.reduced_key_bytes(k);
+                    large_table.remove(ks, reduced_key, position, wal_iterator.wal())?;
                 }
             }
         }
@@ -911,15 +944,13 @@ mod test {
         let mut data = Vec::with_capacity(1024);
         let (key_shape, ks) = KeyShape::new_single(4, 4, 4);
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let mut it = db.iterator(ks);
             assert!(it.next().is_none());
             for v in 0..1024u32 {
@@ -935,15 +966,13 @@ mod test {
             assert_eq!(s, data);
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let it = db.iterator(ks);
             let s: DbResult<Vec<_>> = it.collect();
             let s = s.unwrap();
@@ -990,25 +1019,30 @@ mod test {
         let mut random = sequential.clone();
         ThreadRng::default().fill(&mut random[..]);
         random.sort();
-        println!("Starting sequential test");
-        test_iterator_run(sequential);
-        println!("Starting random test");
-        test_iterator_run(random);
+        for reduced in [true, false] {
+            let ks_config = if reduced {
+                KeySpaceConfig::default()
+            } else {
+                KeySpaceConfig::default().with_key_reduction(0..16)
+            };
+            println!("Starting sequential test, reduced={reduced}");
+            test_iterator_run(sequential.clone(), ks_config.clone());
+            println!("Starting random test, reduced={reduced}");
+            test_iterator_run(random.clone(), ks_config);
+        }
     }
 
-    fn test_iterator_run(data: Vec<u128>) {
+    fn test_iterator_run(data: Vec<u128>, ks_config: KeySpaceConfig) {
         let dir = tempdir::TempDir::new("test-iterator").unwrap();
         let config = Arc::new(Config::small());
-        let (key_shape, ks) = KeyShape::new_single(16, 4, 4);
-        let db = Arc::new(
-            Db::open(
-                dir.path(),
-                key_shape.clone(),
-                config.clone(),
-                Metrics::new(),
-            )
-            .unwrap(),
-        );
+        let (key_shape, ks) = KeyShape::new_single_config(16, 4, 4, ks_config);
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
         for k in &data {
             db.insert(ks, ku128(*k), vu128(*k)).unwrap();
         }
@@ -1049,15 +1083,13 @@ mod test {
         let config = Arc::new(Config::small());
         let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let mut it = db.iterator(ks);
             assert!(it.next().is_none());
             db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
@@ -1080,15 +1112,13 @@ mod test {
             );
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let mut it = db.iterator(ks);
             it.set_lower_bound(vec![1, 2, 3, 4, 0]);
             it.set_upper_bound(vec![1, 2, 3, 4, 10]);
@@ -1112,29 +1142,25 @@ mod test {
         let config = Arc::new(Config::small());
         let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             assert!(db.is_empty());
             db.insert(ks, vec![1, 2, 3, 4, 0], vec![1]).unwrap();
             assert!(!db.is_empty());
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             assert!(!db.is_empty());
         }
     }
@@ -1150,15 +1176,13 @@ mod test {
         let _ks3 = ksb.add_key_space("d", 3, 12, 12);
         let key_shape = ksb.build();
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             db.insert(ks0, vec![], vec![1]).unwrap();
             db.insert(ks1, vec![1], vec![2]).unwrap();
             db.insert(ks2, vec![1, 2], vec![3]).unwrap();
@@ -1167,15 +1191,13 @@ mod test {
             assert_eq!(db.get(ks2, &[1, 2]).unwrap(), Some(vec![3].into()));
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             assert_eq!(db.get(ks0, &[]).unwrap(), Some(vec![1].into()));
             assert_eq!(db.get(ks1, &[1]).unwrap(), Some(vec![2].into()));
             assert_eq!(db.get(ks2, &[1, 2]).unwrap(), Some(vec![3].into()));
@@ -1187,15 +1209,13 @@ mod test {
         let dir = tempdir::TempDir::new("test-last-in-range").unwrap();
         let config = Arc::new(Config::small());
         let (key_shape, ks) = KeyShape::new_single(5, 12, 12);
-        let db = Arc::new(
-            Db::open(
-                dir.path(),
-                key_shape.clone(),
-                config.clone(),
-                Metrics::new(),
-            )
-            .unwrap(),
-        );
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 6], vec![1]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 5], vec![2]).unwrap();
         db.insert(ks, vec![1, 2, 3, 4, 10], vec![3]).unwrap();
@@ -1230,15 +1250,13 @@ mod test {
         let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
-        let db = Arc::new(
-            Db::open(
-                dir.path(),
-                key_shape.clone(),
-                config.clone(),
-                metrics.clone(),
-            )
-            .unwrap(),
-        );
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
 
         for i in 0..1024u64 {
             db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
@@ -1264,15 +1282,13 @@ mod test {
         let ks = ksb.add_key_space_config("k", 8, 1, 1, ksc);
         let key_shape = ksb.build();
         let metrics = Metrics::new();
-        let db = Arc::new(
-            Db::open(
-                dir.path(),
-                key_shape.clone(),
-                config.clone(),
-                metrics.clone(),
-            )
-            .unwrap(),
-        );
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
 
         for i in 0..1000u64 {
             db.insert(ks, i.to_be_bytes().to_vec(), vec![]).unwrap();
@@ -1364,15 +1380,13 @@ mod test {
         }
         let other_key = vec![129, 2, 3, 4, 5];
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             {
                 // todo this code predates KS api so we calculate cells manually
                 // todo rewrite with using ks API instead
@@ -1407,28 +1421,24 @@ mod test {
             check_metrics(&db.metrics, 0, 1, 1, 0);
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             check_all(&db, ks, 10);
             check_metrics(&db.metrics, 0, 0, 0, 0);
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 11], vec![11]).unwrap();
             db.insert(ks, vec![1, 2, 3, 4, 12], vec![12]).unwrap();
             thread::sleep(Duration::from_millis(100)); // todo use barrier w/ flusher thread instead
@@ -1439,15 +1449,13 @@ mod test {
             check_metrics(&db.metrics, 0, 1, 0, 0);
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    force_unload_config(&config),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                force_unload_config(&config),
+                Metrics::new(),
+            )
+            .unwrap();
             check_all(&db, ks, 13);
             check_metrics(&db.metrics, 0, 0, 0, 0);
             db.rebuild_control_region().unwrap(); // this puts all entries into clean state
@@ -1491,13 +1499,7 @@ mod test {
         assert_eq!(&db.get(ks, &[1]).unwrap().unwrap(), &[4]);
         db.remove(ks, vec![1]).unwrap();
         assert_eq!(db.get(ks, &[1]).unwrap(), None);
-        assert_eq!(
-            3,
-            metrics
-                .lookup_result
-                .with_label_values(&["k", "found", "lru"])
-                .get()
-        );
+        assert_eq!(3, lru_lookups("k", &metrics));
     }
 
     // This test is disabled as it takes a long time, but it should be run if logic around
@@ -1534,15 +1536,13 @@ mod test {
         let cached_value;
         let key = Bytes::from(15u32.to_be_bytes().to_vec());
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let num_threads = 16;
             let mut threads = Vec::with_capacity(num_threads);
             for _ in 0..num_threads {
@@ -1564,18 +1564,153 @@ mod test {
             cached_value = db.get(ks, &key).unwrap().unwrap();
         }
         {
-            let db = Arc::new(
-                Db::open(
-                    dir.path(),
-                    key_shape.clone(),
-                    config.clone(),
-                    Metrics::new(),
-                )
-                .unwrap(),
-            );
+            let db = Db::open(
+                dir.path(),
+                key_shape.clone(),
+                config.clone(),
+                Metrics::new(),
+            )
+            .unwrap();
             let replay_value = db.get(ks, &key).unwrap().unwrap();
             assert_eq!(replay_value, cached_value);
         }
+    }
+
+    #[test]
+    fn test_key_reduction() {
+        let dir = tempdir::TempDir::new("test_key_reduction").unwrap();
+        let config = Arc::new(Config::small());
+        let ks_config = KeySpaceConfig::new().with_key_reduction(0..2);
+        let (key_shape, ks) = KeyShape::new_single_config(4, 1, 1, ks_config);
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            Metrics::new(),
+        )
+        .unwrap();
+
+        db.insert(ks, vec![1, 2, 3, 4], vec![1]).unwrap();
+        db.insert(ks, vec![1, 3, 3, 4], vec![2]).unwrap();
+        db.insert(ks, vec![1, 5, 3, 4], vec![3]).unwrap();
+
+        // Simple get tests
+        assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
+        assert_eq!(db.get(ks, &[1, 3, 3, 4]).unwrap().unwrap().as_ref(), &[2]);
+        assert_eq!(db.get(ks, &[1, 5, 3, 4]).unwrap().unwrap().as_ref(), &[3]);
+        assert!(db.get(ks, &[1, 6, 3, 4]).unwrap().is_none());
+        assert!(db.get(ks, &[1, 5, 4, 4]).unwrap().is_none());
+
+        // Last in range tests
+        let (k, v) = db
+            .last_in_range(
+                ks,
+                &Bytes::from(vec![1, 3, 3, 4]),
+                &Bytes::from(vec![1, 3, 3, 4]),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(k.as_ref(), &[1, 3, 3, 4]);
+        assert_eq!(v.as_ref(), &[2]);
+
+        let r = db
+            .last_in_range(
+                ks,
+                &Bytes::from(vec![1, 3, 6, 7]),
+                &Bytes::from(vec![1, 3, 6, 7]),
+            )
+            .unwrap();
+        assert_eq!(None, r);
+
+        // Iterator test (forward direction)
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 4]);
+        iterator.set_upper_bound(vec![1, 3, 3, 5]);
+        let (k, v) = iterator.next().unwrap().unwrap();
+        assert_eq!(k.as_ref(), &[1, 3, 3, 4]);
+        assert_eq!(v.as_ref(), &[2]);
+        assert!(iterator.next().is_none());
+
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 5]);
+        iterator.set_upper_bound(vec![1, 3, 3, 6]);
+        assert!(iterator.next().is_none());
+
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 3]);
+        iterator.set_upper_bound(vec![1, 3, 3, 4]);
+        assert!(iterator.next().is_none());
+
+        // Iterator test (reverse direction)
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 4]);
+        iterator.set_upper_bound(vec![1, 3, 3, 5]);
+        iterator.reverse();
+        let (k, v) = iterator.next().unwrap().unwrap();
+        assert_eq!(k.as_ref(), &[1, 3, 3, 4]);
+        assert_eq!(v.as_ref(), &[2]);
+        assert!(iterator.next().is_none());
+
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 5]);
+        iterator.set_upper_bound(vec![1, 3, 3, 6]);
+        iterator.reverse();
+        assert!(iterator.next().is_none());
+
+        let mut iterator = db.iterator(ks);
+        iterator.set_lower_bound(vec![1, 3, 3, 3]);
+        iterator.set_upper_bound(vec![1, 3, 3, 4]);
+        iterator.reverse();
+        assert!(iterator.next().is_none());
+
+        // Remove test
+        db.remove(ks, vec![1, 3, 3, 4]).unwrap();
+        assert_eq!(db.get(ks, &[1, 3, 3, 4]).unwrap(), None);
+    }
+
+    #[test]
+    fn test_key_reduction_lru() {
+        let dir = tempdir::TempDir::new("test_key_reduction_lru").unwrap();
+        let config = Arc::new(Config::small());
+        let ks_config = KeySpaceConfig::new()
+            .with_key_reduction(0..2)
+            .with_value_cache_size(2);
+        let (key_shape, ks) = KeyShape::new_single_config(4, 1, 1, ks_config);
+        let metrics = Metrics::new();
+        let db = Db::open(
+            dir.path(),
+            key_shape.clone(),
+            config.clone(),
+            metrics.clone(),
+        )
+        .unwrap();
+
+        db.insert(ks, vec![1, 2, 3, 4], vec![1]).unwrap();
+        assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
+        assert_eq!(1, lru_lookups("root", &metrics));
+
+        db.insert(ks, vec![1, 3, 3, 4], vec![2]).unwrap();
+        assert_eq!(db.get(ks, &[1, 3, 3, 4]).unwrap().unwrap().as_ref(), &[2]);
+        assert_eq!(2, lru_lookups("root", &metrics));
+
+        db.insert(ks, vec![1, 5, 3, 4], vec![3]).unwrap();
+        assert_eq!(db.get(ks, &[1, 5, 3, 4]).unwrap().unwrap().as_ref(), &[3]);
+        assert_eq!(3, lru_lookups("root", &metrics));
+
+        // First key was evicted, so lru lookup metric does not increment
+        assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
+        assert_eq!(3, lru_lookups("root", &metrics));
+        // Since we just fetched this key, and it should be populated to lru,
+        // the next lookup comes from the lru cache
+        assert_eq!(db.get(ks, &[1, 2, 3, 4]).unwrap().unwrap().as_ref(), &[1]);
+        assert_eq!(4, lru_lookups("root", &metrics));
+    }
+
+    fn lru_lookups(ks: &str, metrics: &Metrics) -> u64 {
+        metrics
+            .lookup_result
+            .with_label_values(&[ks, "found", "lru"])
+            .get()
     }
 
     fn force_unload_config(config: &Config) -> Arc<Config> {
